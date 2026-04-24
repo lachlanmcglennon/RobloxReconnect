@@ -8,6 +8,12 @@
 
 **Automated Roblox connection management tool with GUI interface**
 
+> 🎉 **V3.0 is here!** A complete rebuild with tabbed UI, multi-profile servers,
+> tray icon, anti-AFK, Discord webhooks, scheduling and 70+ features.
+> See [FEATURES.md](./FEATURES.md) for the full 200-feature roadmap.
+>
+> **Script:** `RobloxReconnectV3.0.Ahk` (V2 is kept as `RobloxReconnectV2.0.Ahk`)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![AutoHotkey v2](https://img.shields.io/badge/AutoHotkey-v2.0-blue.svg)](https://www.autohotkey.com/)
 [![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)](https://www.microsoft.com/en-us/windows)
