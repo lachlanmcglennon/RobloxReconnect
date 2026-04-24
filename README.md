@@ -28,10 +28,10 @@
 - Prevents long AFK timeouts
 - Maintains continuous server presence
 
-### 🖥️ **Borderless Fullscreen**
-- Removes window borders for immersive gaming
-- Full-screen experience while keeping Alt+Tab functionality
-- Automatic setup after reconnection
+### 🔽 **GPU Saver (Minimize Roblox)**
+- Optional: minimize the Roblox window automatically after joining
+- Reduces GPU load while idling in a server
+- Toggle from the GUI at any time
 
 ### 🌐 **Browser Management**
 - Automatically closes web browsers after successful reconnection
@@ -89,7 +89,7 @@
 | **VIP Server Link** | Your Roblox VIP server URL | - |
 | **Check Interval** | How often to check connection (seconds) | 5 |
 | **Auto Rejoin** | Scheduled rejoin interval (hours) | 1 |
-| **Borderless Mode** | Enable borderless fullscreen | ✓ |
+| **Minimize Roblox** | Minimize Roblox after opening (GPU saver) | - |
 | **Auto Monitoring** | Start monitoring automatically | - |
 
 ---
@@ -100,7 +100,6 @@
 |-----|----------|
 | `F1` | Toggle monitoring on/off |
 | `F2` | Manual reconnect |
-| `F3` | Toggle borderless mode |
 
 ---
 
@@ -160,10 +159,6 @@ RECONNECT_DELAY := 3000   ; 3 seconds delay before reconnect
 - Verify your VIP server link is correct
 - Check if Roblox is properly installed
 - Ensure link format: `roblox://placeId=123456&linkCode=abcdef`
-
-**❌ Borderless mode not working**
-- Try pressing F3 manually after Roblox opens
-- Some antivirus software may block window manipulation
 
 **❌ Auto-rejoin not triggering**
 - Check that "Enable Auto Rejoin" is checked

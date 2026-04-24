@@ -14,6 +14,7 @@ SERVER_TYPE := "private"  ; "public" or "private"
 CHECK_INTERVAL := 5000  ; 5 seconds
 RECONNECT_DELAY := 3000  ; 3 seconds
 AUTO_REJOIN_HOURS := 1  ; Rejoin every 1 hour
+MINIMIZE_ROBLOX := false  ; Minimize Roblox window after opening to save GPU
 IsMonitoringActive := false
 IsAutoRejoinActive := false
 
@@ -75,6 +76,8 @@ AutoRejoinCheck.OnEvent("Click", ToggleAutoRejoin)
 myGui.Add("Text", "x10 y335 w150", "Check every:")
 CheckIntervalEdit := myGui.Add("Edit", "x160 y332 w60 h20 Number", "5")
 myGui.Add("Text", "x230 y335 w50", "seconds")
+MinimizeCheck := myGui.Add("Checkbox", "x290 y334 w120", "Minimize Roblox")
+MinimizeCheck.OnEvent("Click", ToggleMinimize)
 
 ; Control buttons
 StartBtn := myGui.Add("Button", "x10 y365 w100 h30", "Start Monitoring")
@@ -104,24 +107,40 @@ RejoinTimer := ""
 
 ; Settings Functions
 LoadSettings() {
-    global SERVER_LINK, GAME_ID, SERVER_TYPE, CONFIG_FILE
+    global SERVER_LINK, GAME_ID, SERVER_TYPE, CONFIG_FILE, MINIMIZE_ROBLOX
     try {
         if (FileExist(CONFIG_FILE)) {
             SERVER_LINK := IniRead(CONFIG_FILE, "Settings", "ServerLink", "")
             GAME_ID := IniRead(CONFIG_FILE, "Settings", "GameId", "")
             SERVER_TYPE := IniRead(CONFIG_FILE, "Settings", "ServerType", "private")
+            MINIMIZE_ROBLOX := (IniRead(CONFIG_FILE, "Settings", "MinimizeRoblox", "0") = "1")
         }
     } catch Error as e {
         ; If config file doesn't exist or error reading, use defaults
         SERVER_LINK := ""
         GAME_ID := ""
         SERVER_TYPE := "private"
+        MINIMIZE_ROBLOX := false
     }
 }
 
+; Validates a Roblox VIP/server link to avoid passing arbitrary shell commands to Run()
+IsValidVipLink(link) {
+    link := Trim(link)
+    if (link = "")
+        return false
+    if (RegExMatch(link, "i)^https://(www\.)?roblox\.com/"))
+        return true
+    if (RegExMatch(link, "i)^roblox://"))
+        return true
+    return false
+}
+
 ApplyLoadedSettings() {
-    global SERVER_TYPE, SERVER_LINK, GAME_ID
-    
+    global SERVER_TYPE, SERVER_LINK, GAME_ID, MINIMIZE_ROBLOX
+
+    MinimizeCheck.Value := MINIMIZE_ROBLOX ? 1 : 0
+
     if (SERVER_TYPE = "public") {
         ServerTypeRadio2.Value := 1
         ServerTypeRadio1.Value := 0
@@ -167,23 +186,24 @@ SelectServerType(type) {
 }
 
 SaveSettings(*) {
-    global SERVER_LINK, GAME_ID, SERVER_TYPE, CONFIG_FILE
-    
+    global SERVER_LINK, GAME_ID, SERVER_TYPE, CONFIG_FILE, MINIMIZE_ROBLOX
+
     if (SERVER_TYPE = "private") {
         SERVER_LINK := PrivateLinkEdit.Text
     } else {
         GAME_ID := PublicGameEdit.Text
     }
-    
+
     try {
         ; Create config directory if it doesn't exist
         if (!FileExist(A_ScriptDir))
             DirCreate(A_ScriptDir)
-            
+
         ; Save to ini file
         IniWrite(SERVER_LINK, CONFIG_FILE, "Settings", "ServerLink")
         IniWrite(GAME_ID, CONFIG_FILE, "Settings", "GameId")
         IniWrite(SERVER_TYPE, CONFIG_FILE, "Settings", "ServerType")
+        IniWrite(MINIMIZE_ROBLOX ? "1" : "0", CONFIG_FILE, "Settings", "MinimizeRoblox")
         
         UpdateLog("✅ Settings saved successfully!")
         MsgBox("Settings saved successfully!", "Saved", 64)
@@ -232,9 +252,20 @@ TestPrivateConnection(*) {
         MsgBox("Please enter VIP Server link before testing!", "Warning", 48)
         return
     }
-    
+    if (!IsValidVipLink(serverLink)) {
+        UpdateLog("❌ Invalid VIP link. Must start with https://www.roblox.com/ or roblox://")
+        MsgBox("Invalid VIP link format.`nExpected: https://www.roblox.com/... or roblox://...", "Invalid Link", 48)
+        return
+    }
+
     UpdateLog("Testing private server connection...")
     TestConnection(serverLink)
+}
+
+ToggleMinimize(*) {
+    global MINIMIZE_ROBLOX
+    MINIMIZE_ROBLOX := (MinimizeCheck.Value = 1)
+    UpdateLog(MINIMIZE_ROBLOX ? "🔽 Minimize Roblox after opening: ON" : "🔼 Minimize Roblox after opening: OFF")
 }
 
 TestPublicConnection(*) {
@@ -330,6 +361,12 @@ StartMonitoring(*) {
             MonitoringCheck.Value := 0
             return
         }
+        if (!IsValidVipLink(serverLink)) {
+            UpdateLog("❌ Invalid VIP link format. Must start with https://www.roblox.com/ or roblox://")
+            MsgBox("Invalid VIP link format.`nExpected: https://www.roblox.com/... or roblox://...", "Invalid Link", 48)
+            MonitoringCheck.Value := 0
+            return
+        }
         SERVER_LINK := serverLink
     } else {
         gameId := PublicGameEdit.Text
@@ -378,6 +415,11 @@ ManualReconnect(*) {
             MsgBox("Please enter VIP Server link before reconnecting!", "Warning", 48)
             return
         }
+        if (!IsValidVipLink(serverLink)) {
+            UpdateLog("❌ Invalid VIP link format. Must start with https://www.roblox.com/ or roblox://")
+            MsgBox("Invalid VIP link format.`nExpected: https://www.roblox.com/... or roblox://...", "Invalid Link", 48)
+            return
+        }
         SERVER_LINK := serverLink
     } else {
         gameId := PublicGameEdit.Text
@@ -388,12 +430,13 @@ ManualReconnect(*) {
         }
         GAME_ID := gameId
     }
-    
+
     UpdateLog("Starting manual reconnection...")
     ReconnectToGame()
 }
 
 ExitScript(*) {
+    global SERVER_TYPE, CONFIG_FILE, MINIMIZE_ROBLOX
     ; Auto-save settings before exit
     try {
         if (SERVER_TYPE = "private" && PrivateLinkEdit.Text != "") {
@@ -402,6 +445,9 @@ ExitScript(*) {
             IniWrite(PublicGameEdit.Text, CONFIG_FILE, "Settings", "GameId")
         }
         IniWrite(SERVER_TYPE, CONFIG_FILE, "Settings", "ServerType")
+        IniWrite(MINIMIZE_ROBLOX ? "1" : "0", CONFIG_FILE, "Settings", "MinimizeRoblox")
+    } catch Error as e {
+        ; Ignore save errors on exit
     }
     ExitApp()
 }
@@ -427,7 +473,7 @@ CheckRobloxStatusFunc() {
                 return
             }
         }
-        
+
         ; Check Roblox window titles
         robloxWindows := WinGetList("ahk_exe RobloxPlayerBeta.exe")
         for hwnd in robloxWindows {
@@ -438,8 +484,12 @@ CheckRobloxStatusFunc() {
                     ReconnectToGame()
                     return
                 }
+            } catch Error as e {
+                ; Window may have closed between enumeration and query; ignore
             }
         }
+    } catch Error as e {
+        UpdateLog("⚠️ Status check error: " . e.Message)
     }
 }
 
@@ -453,7 +503,7 @@ AutoRejoinTimerFunc() {
 
 ; Core Functions
 ReconnectToGame() {
-    global SERVER_LINK, GAME_ID, SERVER_TYPE, RECONNECT_DELAY
+    global SERVER_LINK, GAME_ID, SERVER_TYPE, RECONNECT_DELAY, MINIMIZE_ROBLOX
     
     ; Determine URL based on server type
     targetUrl := ""
@@ -499,15 +549,40 @@ ReconnectToGame() {
                 UpdateLog("✅ Roblox opened successfully, loading game...")
                 Sleep(8000)  ; Wait for game to load
                 UpdateLog("🎮 Successfully joined " . SERVER_TYPE . " server!")
-                
+
                 ; Close web browsers after successful reconnection
                 CloseBrowsers()
+
+                ; Minimize Roblox to save GPU if option is enabled
+                if (MINIMIZE_ROBLOX) {
+                    MinimizeRobloxWindows()
+                }
                 break
             }
             Sleep(1000)
         }
     } catch Error as e {
         UpdateLog("❌ Error during reconnection: " . e.Message)
+    }
+}
+
+; Minimize all Roblox windows to reduce GPU usage while idle
+MinimizeRobloxWindows() {
+    try {
+        robloxWindows := WinGetList("ahk_exe RobloxPlayerBeta.exe")
+        minimized := 0
+        for hwnd in robloxWindows {
+            try {
+                WinMinimize("ahk_id " . hwnd)
+                minimized++
+            } catch Error as e {
+                ; Window may have closed; ignore
+            }
+        }
+        if (minimized > 0)
+            UpdateLog("🔽 Minimized Roblox window (GPU saver)")
+    } catch Error as e {
+        UpdateLog("⚠️ Could not minimize Roblox: " . e.Message)
     }
 }
 
