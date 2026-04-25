@@ -21,7 +21,7 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 16. ✅ Lifetime crash counter
 17. 🚧 Ping / latency pre-check
 18. 🚧 DNS resolution check before reconnect
-19. 🚧 Roblox status API check (https://status.roblox.com)
+19. ✅ Roblox status API check (https://status.roblox.com)
 20. 🚧 Smart rate-limit avoidance (detect 429-like patterns)
 
 ## Server Profiles
@@ -38,12 +38,12 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 31. ✅ Open active profile in browser
 32. ✅ Pick random profile (roulette)
 33. ✅ Persist profiles to INI
-34. 🚧 Rotate through profiles on each reconnect
-35. 🚧 Import profiles from text file
-36. 🚧 Export profiles
+34. ✅ Rotate through profiles on each reconnect
+35. ✅ Import profiles from text file
+36. ✅ Export profiles
 37. 🚧 Tag/category system per profile
-38. 🚧 Favorite/star profile flag
-39. 🚧 Profile search/filter
+38. ✅ Favorite/star profile flag
+39. ✅ Profile search/filter
 40. 🚧 Recent servers history
 
 ## GUI & UX
@@ -63,7 +63,7 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 54. 🚧 High-contrast accessibility mode
 55. 🚧 Configurable font size
 56. 🚧 Compact/minimal mode
-57. 🚧 Remember window size/position
+57. ✅ Remember window size/position
 58. 🚧 Collapsible sections
 59. 🚧 Onboarding wizard for first run
 60. 🚧 Localization (EN/ES/FR/DE/JA/KR/PT/RU)
@@ -83,7 +83,7 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 70. ✅ F4 toggle anti-AFK
 71. ✅ Ctrl+Shift+R emergency reconnect
 72. ✅ Ctrl+Shift+Q panic stop
-73. 🚧 Fully user-configurable hotkey bindings
+73. ✅ Fully user-configurable hotkey bindings
 74. 🚧 Hotkey conflict detection
 75. 🚧 Quick-switch profile hotkey
 
@@ -118,7 +118,7 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 99. 🚧 Custom key sequences / macros
 100. 🚧 Anti-AFK profile presets (idle-farm / grinder / chatter)
 101. 🚧 Randomized jiggle patterns
-102. 🚧 Pause during reconnect
+102. ✅ Pause during reconnect
 103. 🚧 Record/replay idle routine
 
 ## Notifications & Alerts
@@ -127,7 +127,7 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 106. ✅ Sound file alerts (.wav/.mp3)
 107. ✅ Discord webhook alerts
 108. ✅ Test tray / test Discord buttons
-109. 🚧 Volume slider for sound alerts
+109. ✅ Volume slider for sound alerts
 110. 🚧 Telegram bot integration
 111. 🚧 Email alerts on prolonged disconnect
 112. 🚧 Discord rich embeds with stats
@@ -142,8 +142,8 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 119. ✅ Windows auto-start via `Run` registry key
 120. 🚧 Weekly schedule (day-of-week masks)
 121. 🚧 Cron-style scheduling
-122. 🚧 Stop after N reconnects
-123. 🚧 Pause on battery
+122. ✅ Stop after N reconnects
+123. ✅ Pause on battery
 124. 🚧 Wake-from-sleep on scheduled rejoin
 125. 🚧 Holiday / DND mode
 
@@ -151,8 +151,8 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 126. ✅ VIP link format validation
 127. ✅ Game ID format validation
 128. ✅ Reject arbitrary URLs (no shell-exec of untrusted strings)
-129. 🚧 Mask VIP link in UI (click-to-reveal)
-130. 🚧 Hide link in logs
+129. ✅ Mask VIP link in UI (click-to-reveal)
+130. ✅ Hide link in logs
 131. 🚧 PIN-lock sensitive settings
 132. 🚧 Warn on suspicious URL patterns
 
@@ -166,7 +166,7 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 139. ✅ Open log file externally
 140. ✅ Timestamped entries
 141. ✅ Log-level rank filtering
-142. 🚧 In-log search (Ctrl+F)
+142. ✅ In-log search (Ctrl+F)
 143. 🚧 Colour-coded log lines
 144. 🚧 Structured (JSON) log option
 145. 🚧 Remote log forwarding
@@ -181,9 +181,9 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 152. 🚧 Per-day bar chart
 153. 🚧 Longest uninterrupted uptime
 154. 🚧 Time-to-reconnect distribution
-155. 🚧 Success rate %
+155. ✅ Success rate %
 156. 🚧 Weekly digest (Discord)
-157. 🚧 CSV export
+157. ✅ CSV export
 
 ## Configuration
 158. ✅ INI config file
@@ -194,13 +194,13 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 163. ✅ Reset to defaults (preserves profiles)
 164. ✅ Open data folder button
 165. 🚧 JSON config option
-166. 🚧 Config backup on each save
+166. ✅ Config backup on each save
 167. 🚧 Portable mode (no registry, no %APPDATA%)
 168. 🚧 Per-profile config overrides
 
 ## Diagnostics
 169. ✅ Internet connectivity check
-170. 🚧 Built-in self-test button
+170. ✅ Built-in self-test button
 171. 🚧 Network latency graph
 172. 🚧 Packet-loss indicator
 173. 🚧 DNS test tool
@@ -232,21 +232,23 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 193. ✅ Data folder shortcut
 194. ✅ In-GUI "Go To Profiles" jump button
 195. 🚧 Changelog viewer
-196. 🚧 Auto-update checker (GitHub releases)
+196. ✅ Auto-update checker (GitHub releases)
 197. 🚧 One-click update
 198. 🚧 Birthday / seasonal easter eggs
-199. 🚧 Tooltip help on every control
+199. 🟡 Tooltip help on every control
 200. 🚧 Printable cheatsheet PDF
 
 ---
 
 ## Summary
 
-- **~70** features fully implemented in V3.0
-- **~130** planned / nice-to-have on the roadmap
+- **~90** features fully implemented in V3.1 (V3.0 baseline + 20 new)
+- **~110** planned / nice-to-have on the roadmap
+- New in V3.1: Roblox status check (#19), profile rotation (#34), profile import/export (#35/36), favorites (#38), profile filter (#39), window-pos persistence (#57), rebindable hotkeys (#73), pause Anti-AFK during reconnect (#102), volume slider (#109), stop-after-N (#122), pause-on-battery (#123), VIP link masking (#129), link-redaction in logs (#130), in-log search (#142), success-rate % (#155), CSV stats export (#157), config backups (#166), self-test (#170), auto-update check (#196), status-bar hints (#199, partial)
 - File layout:
-  - `RobloxReconnectV3.0.Ahk` — main script
+  - `RobloxReconnectV3.1.Ahk` — main script
   - `RobloxReconnect-Data/config.ini` — user config
   - `RobloxReconnect-Data/profiles.ini` — saved server profiles
   - `RobloxReconnect-Data/stats.ini` — lifetime counters
   - `RobloxReconnect-Data/app.log` — rotating activity log
+  - `RobloxReconnect-Data/config-backups/` — auto-saved config snapshots (last 20)

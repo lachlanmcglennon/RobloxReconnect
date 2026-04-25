@@ -1,4 +1,4 @@
-# 🎮 Roblox Auto-Reconnect Tool
+# 🎮 RobloxReconnect
 
 <div align="center">
 
@@ -6,13 +6,16 @@
 ![AutoHotkey](https://img.shields.io/badge/AutoHotkey-334455?style=for-the-badge&logo=autohotkey&logoColor=white)
 ![Windows](https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)
 
-**Automated Roblox connection management tool with GUI interface**
+**Automated Roblox connection management with a full tabbed GUI**
 
-> 🎉 **V3.0 is here!** A complete rebuild with tabbed UI, multi-profile servers,
-> tray icon, anti-AFK, Discord webhooks, scheduling and 70+ features.
+> 🚀 **V3.1 is here!** Built on top of V3.0's tabbed UI, V3.1 ships an audit
+> bug-fix pass plus 20 high-value roadmap features:
+> profile rotation, JSON import/export, favorites & filter, rebindable hotkeys,
+> pause-on-battery, success-rate %, CSV stats export, config backups,
+> Roblox status check, self-test, auto-update check and more.
 > See [FEATURES.md](./FEATURES.md) for the full 200-feature roadmap.
 >
-> **Script:** `RobloxReconnectV3.0.Ahk` (V2 is kept as `RobloxReconnectV2.0.Ahk`)
+> **Script:** `RobloxReconnectV3.1.Ahk` (V2 / V3.0 kept for legacy reference)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![AutoHotkey v2](https://img.shields.io/badge/AutoHotkey-v2.0-blue.svg)](https://www.autohotkey.com/)
@@ -22,223 +25,187 @@
 
 ---
 
-## ✨ Features
+## ✨ Highlights
 
-### 🔄 **Auto Reconnection**
-- Automatically detects when Roblox disconnects
-- Instantly reconnects using your VIP server link
-- Handles connection errors and timeouts
+### 🔄 Reliable auto-reconnect
+- Detects Roblox process exit, error dialogs and disconnect window-titles
+- Configurable check interval, max attempts cap, cooldown, exponential backoff and jitter
+- Pre-checks internet connectivity (skips when offline)
+- Optional Roblox status API ping before reconnecting
 
-### ⏰ **Scheduled Rejoin**
-- Auto-rejoin every 1-24 hours (configurable)
-- Prevents long AFK timeouts
-- Maintains continuous server presence
+### 🗂️ Multi-profile server manager
+- VIP private-link or public game-ID profiles, per-profile notes
+- Favorites (★), live filter / search, JSON import / export
+- Profile rotation: cycle to next profile on each reconnect
+- VIP link masking in UI + redaction in logs (privacy)
 
-### 🔽 **GPU Saver (Minimize Roblox)**
-- Optional: minimize the Roblox window automatically after joining
-- Reduces GPU load while idling in a server
-- Toggle from the GUI at any time
+### ⏰ Scheduling & limits
+- Scheduled rejoin every N hours / M minutes
+- "Stop at" wall-clock time, daily quiet-hours window
+- Lifetime stop-after-N reconnects
+- Pause-on-battery (laptop power-aware via `GetSystemPowerStatus`)
 
-### 🌐 **Browser Management**
-- Automatically closes web browsers after successful reconnection
-- Supports all major browsers (Chrome, Firefox, Edge, Opera, Brave, etc.)
-- Helps free up system resources
+### 💤 Anti-AFK
+- Configurable key, interval and jitter
+- Optional pause during reconnect window so it can't fight the launcher
 
-### 🎛️ **User-Friendly GUI**
-- Clean, intuitive interface
-- Real-time status monitoring
-- Comprehensive logging system
-- Customizable settings
+### 🔔 Alerts
+- Optional sound on disconnect / reconnect with master volume slider
+- Tray balloon notifications, Discord webhook ping
+- Per-event toggles
+
+### 📊 Stats & logs
+- Lifetime reconnect / crash counters, uptime tracking
+- Successful vs failed reconnect breakdown + success-rate %
+- CSV export of stats
+- In-app log viewer with filter, search, autoscroll and export
+
+### 🛠️ Tooling
+- Tray icon with right-click menu, hide-to-tray on close
+- Roblox-process priority management
+- Self-test diagnostic, GitHub release update check
+- Config backups (last 20) on every save
+- Window position / size persistence
+- Rebindable hotkeys
 
 ---
 
 ## 📋 Requirements
 
-- **Windows 7/8/10/11**
-- **AutoHotkey v2.0+** ([Download here](https://www.autohotkey.com/))
-- **Roblox** installed on your system
+- **Windows 10 / 11** (8 / 7 should work but is untested)
+- **AutoHotkey v2.0+** ([download](https://www.autohotkey.com/))
+- **Roblox** installed (works with the Microsoft Store and standalone clients)
 
 ---
 
 ## 🚀 Installation
 
-1. **Download AutoHotkey v2**
-   ```
-   https://www.autohotkey.com/download/
-   ```
-
-2. **Clone this repository**
-   ```bash
-   git clone https://github.com/yourusername/roblox-auto-reconnect.git
-   cd roblox-auto-reconnect
-   ```
-
-3. **Run the script**
-   - Double-click `RobloxAutoReconnect.ahk`
-   - Or right-click and select "Compile Script" to create an executable
-
----
-
-## 🎯 Usage
-
-### Getting Started
-1. **Launch the tool** - Run the `.ahk` file or compiled `.exe`
-2. **Enter VIP Server Link** - Paste your Roblox VIP server link
-3. **Test Connection** - Click "Test" to verify the link works
-4. **Configure Settings** - Set your preferred monitoring interval and auto-rejoin schedule
-5. **Start Monitoring** - Click "Start Monitoring" to begin
-
-### Configuration Options
-
-| Setting | Description | Default |
-|---------|-------------|---------|
-| **VIP Server Link** | Your Roblox VIP server URL | - |
-| **Check Interval** | How often to check connection (seconds) | 5 |
-| **Auto Rejoin** | Scheduled rejoin interval (hours) | 1 |
-| **Minimize Roblox** | Minimize Roblox after opening (GPU saver) | - |
-| **Auto Monitoring** | Start monitoring automatically | - |
-
----
-
-## ⌨️ Hotkeys
-
-| Key | Function |
-|-----|----------|
-| `F1` | Toggle monitoring on/off |
-| `F2` | Manual reconnect |
-
----
-
-## 📊 Screenshots
-
-### Main Interface
+```powershell
+git clone https://github.com/lachlanmcglennon/RobloxReconnect.git
+cd RobloxReconnect
 ```
-┌─────────────────────────────────────────┐
-│ 🎮 Roblox Auto-Reconnect Tool          │
-├─────────────────────────────────────────┤
-│ VIP Server Link: [________________Test] │
-│ Monitoring Status: ✅ Enabled           │
-│ ☑ Enable Auto Monitoring               │
-│ Auto Rejoin every: [1▼] hours ☑ Enable │
-│ Check every: [5] seconds                │
-│ [Start] [Stop] [Reconnect] [Exit]       │
-│ ┌─────────────────────────────────────┐ │
-│ │ [12:34:56] Started monitoring...    │ │
-│ │ [12:35:01] ✅ Roblox opened        │ │
-│ │ [12:35:09] 🎮 Successfully joined  │ │
-│ └─────────────────────────────────────┘ │
-└─────────────────────────────────────────┘
+
+Then double-click `RobloxReconnectV3.1.Ahk` (AHK v2 must be the default `.ahk`
+handler) or right-click → **Run with AutoHotkey**.
+
+On first launch the script creates a `RobloxReconnect-Data\` folder next to the
+script and writes config / profiles / stats / logs there.
+
+```
+RobloxReconnect-Data\
+├── config.ini             # main settings
+├── profiles.ini           # saved server profiles
+├── stats.ini              # lifetime counters
+├── app.log                # rotating activity log
+└── config-backups\        # auto-saved snapshots (last 20)
 ```
 
 ---
 
-## 🔧 Advanced Configuration
+## 🎯 Quick start
 
-### Supported Browsers
-The tool automatically closes these browsers after reconnection:
-- **Google Chrome** (`chrome.exe`)
-- **Mozilla Firefox** (`firefox.exe`)
-- **Microsoft Edge** (`msedge.exe`)
-- **Opera** (`opera.exe`)
-- **Brave Browser** (`brave.exe`)
-- **Vivaldi** (`vivaldi.exe`)
-- **Internet Explorer** (`iexplore.exe`)
+1. Launch the script — the GUI opens on the **Servers** tab.
+2. Click **Add** to create a profile (VIP link **or** public game ID), give it a
+   name, optionally mark it ★ favorite.
+3. Select the profile and click **Set Active**.
+4. Switch to the **General** tab and click **Start Monitoring**, or press `F1`.
 
-### Customizing Check Intervals
-```autohotkey
-; Modify these values in the script
-CHECK_INTERVAL := 5000    ; 5 seconds (in milliseconds)
-RECONNECT_DELAY := 3000   ; 3 seconds delay before reconnect
-```
+The script will now watch for disconnects and auto-reconnect using your active
+profile (or rotate through your profiles if **Rotate profiles** is enabled).
+
+---
+
+## ⌨️ Default hotkeys
+
+| Hotkey            | Action                                  |
+|-------------------|------------------------------------------|
+| `F1`              | Toggle monitoring on / off               |
+| `F2`              | Manual reconnect now                     |
+| `F3`              | Show / hide the GUI                      |
+| `F4`              | Toggle Anti-AFK                          |
+| `Ctrl+Shift+R`    | Emergency reconnect                      |
+| `Ctrl+Shift+Q`    | Panic stop (kills timers + Anti-AFK)     |
+
+All six are rebindable from **Settings → Hotkeys → Rebind…**.
+
+---
+
+## 🧭 GUI tour
+
+| Tab          | Contents                                                                       |
+|--------------|--------------------------------------------------------------------------------|
+| General      | Start / stop, reconnect now, current status, last reconnect time              |
+| Servers      | Profile list, add / edit / delete, filter, ★ favorite, import / export, rotate |
+| Anti-AFK     | Enable, key, interval, jitter, pause-during-reconnect                          |
+| Schedule     | Scheduled rejoin, stop-at time, quiet hours, stop-after-N, pause-on-battery   |
+| Alerts       | Sound on connect/disconnect, volume, tray balloon, Discord webhook             |
+| Stats        | Lifetime + session counters, success rate, CSV export                          |
+| Logs         | Live log view, level filter, search, export, clear                             |
+| Settings     | Window persistence, hotkey rebind, diagnostics (self-test, status, update)    |
 
 ---
 
 ## 🐛 Troubleshooting
 
-### Common Issues
+- **Script won't start** — make sure AutoHotkey **v2** is installed (v1 will not work).
+- **Reconnect launches the website instead of the app** — Windows must have a
+  Roblox protocol handler registered. Re-install Roblox or run the Microsoft
+  Store version once.
+- **Hotkeys do nothing** — another app may have claimed them; rebind under
+  **Settings → Hotkeys**.
+- **Self-test fails on Roblox install path** — open `Settings → Diagnostics` and
+  inspect the message; the script searches the standard `%LocalAppData%\Roblox\Versions` location.
 
-**❌ Script won't start**
-- Ensure you have AutoHotkey v2.0+ installed
-- Right-click the script and "Run as Administrator"
-
-**❌ Test connection fails**
-- Verify your VIP server link is correct
-- Check if Roblox is properly installed
-- Ensure link format: `roblox://placeId=123456&linkCode=abcdef`
-
-**❌ Auto-rejoin not triggering**
-- Check that "Enable Auto Rejoin" is checked
-- Verify the hour interval is set correctly
-- Monitor the log for scheduled rejoin messages
-
-### Getting Help
-If you encounter issues:
-1. Check the log output in the GUI
-2. Run as Administrator
-3. Disable antivirus temporarily for testing
-4. [Open an issue](https://github.com/yourusername/roblox-auto-reconnect/issues)
+Logs land in `RobloxReconnect-Data\app.log` and the **Logs** tab.
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Here's how you can help:
+PRs welcome — please:
 
-1. **Fork** the repository
-2. **Create** a feature branch (`git checkout -b feature/AmazingFeature`)
-3. **Commit** your changes (`git commit -m 'Add some AmazingFeature'`)
-4. **Push** to the branch (`git push origin feature/AmazingFeature`)
-5. **Open** a Pull Request
-
-### Development Guidelines
-- Follow AutoHotkey v2 syntax
-- Add comments for complex logic
-- Test thoroughly before submitting
-- Update documentation as needed
+1. Fork → feature branch → PR
+2. Stick to AutoHotkey v2 syntax (`#Requires AutoHotkey v2.0`)
+3. Update [`FEATURES.md`](./FEATURES.md) when shipping a roadmap item
+4. Test on a fresh `RobloxReconnect-Data\` folder before submitting
 
 ---
 
 ## 📝 Changelog
 
-### v1.0.0 (2024-09-08)
+### v3.1.0
+- 🐛 Fixed `ProcessSetPriority` mapping (now uses letter codes)
+- 🐛 `AppendLogToView` now trims old lines instead of wiping the view
+- 🐛 `LoadConfig` boolean detection (was masked by `Integer` check)
+- ✨ Profile rotation, favorites, filter, JSON import/export
+- ✨ VIP link masking + log redaction
+- ✨ Rebindable hotkeys, window-position persistence
+- ✨ Pause Anti-AFK during reconnect, sound volume slider
+- ✨ Stop-after-N, pause-on-battery
+- ✨ Roblox status check, self-test, auto-update check
+- ✨ CSV stats export, config-backup on save
+- ✨ Status-bar control hints
+
+### v3.0.0
+- 🎉 Full tabbed-UI rebuild with multi-profile manager, anti-AFK, scheduling,
+      Discord webhooks, tray icon and 70+ features.
+
+### v1.0.0
 - ✨ Initial release
-- 🔄 Auto-reconnection functionality
-- ⏰ Scheduled auto-rejoin system
-- 🖥️ Borderless fullscreen support
-- 🌐 Automatic browser cleanup
-- 🎛️ Full GUI interface with logging
 
 ---
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-```
-MIT License
-
-Copyright (c) 2024 Roblox Auto-Reconnect Tool
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction...
-```
+MIT — see [LICENSE](LICENSE).
 
 ---
 
 ## ⚠️ Disclaimer
 
-This tool is for educational and convenience purposes only. Use at your own risk and ensure compliance with Roblox's Terms of Service. The developers are not responsible for any account actions taken by Roblox.
-
----
-
-## 🌟 Support
-
-If this tool helped you, consider:
-- ⭐ **Star** this repository
-- 🐛 **Report** any bugs you find
-- 💡 **Suggest** new features
-- 🤝 **Share** with friends
+This tool is for educational and convenience purposes only. Use at your own
+risk and ensure compliance with Roblox's Terms of Service. The developers are
+not responsible for any account actions taken by Roblox.
 
 ---
 
@@ -246,6 +213,6 @@ If this tool helped you, consider:
 
 **Made with ❤️ for the Roblox community**
 
-[Report Bug](https://github.com/0Xd01x/roblox-auto-reconnect/issues) • [Request Feature](https://github.com/0Xd01x/roblox-auto-reconnect/issues) • [Discord](https://discord.gg/gRPG3WkWVv)
+[Report Bug](https://github.com/lachlanmcglennon/RobloxReconnect/issues) • [Request Feature](https://github.com/lachlanmcglennon/RobloxReconnect/issues)
 
 </div>

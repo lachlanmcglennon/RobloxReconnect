@@ -1,26 +1,19 @@
 ; ============================================================================
-; Roblox Auto-Reconnect Tool V3.0
+; Roblox Auto-Reconnect Tool V3.1
 ; AutoHotkey v2 - Comprehensive GUI for Roblox session management
 ;
-; Major features:
-;   * Multi-profile server manager (Private/VIP link or Public game ID)
-;   * Tabbed GUI (Monitor / Servers / Window / Anti-AFK / Alerts / Schedule
-;     / Stats / Logs / Settings)
-;   * Tray icon w/ status color, balloon notifications, context menu
-;   * Auto-reconnect on process exit, error dialogs, and disconnect titles
-;   * Configurable cooldown, exponential backoff, randomized jitter
-;   * Internet connectivity pre-check before reconnect
-;   * Scheduled rejoin (hours + minutes) and "stop at time"
-;   * Anti-AFK (mouse jiggle / key press) with jitter & focus-gating
-;   * Window tweaks: minimize after join, set process priority, always-on-top
-;   * Browser auto-close (configurable list) after successful join
-;   * Sound alerts + Discord webhook alerts, per-event toggles
-;   * Session + lifetime stats (uptime, crashes, reconnects, success rate)
-;   * Persistent rotating log file, in-GUI log tail, export/copy/clear
-;   * Hotkeys: F1 monitor, F2 reconnect, F3 minimize, F4 anti-AFK,
-;     Ctrl+Shift+R emergency rejoin, Ctrl+Shift+Q panic stop
-;   * Prevent-sleep while monitoring, optional Windows auto-start
-;   * Config import/export, reset defaults, about dialog
+; V3.1 additions vs V3.0:
+;   * Profile rotation on each reconnect, favorite flag, search/filter
+;   * Profile import/export (JSON)
+;   * Remember window size & position
+;   * User-configurable hotkeys (rebind from Settings)
+;   * Pause Anti-AFK during reconnect, sound volume slider
+;   * Stop-after-N-reconnects safety cap, pause monitoring on battery power
+;   * Mask VIP link in UI, hide links in logs (privacy)
+;   * In-log search, success-rate stat, CSV export of stats
+;   * Auto-update checker (GitHub releases API), Roblox status check
+;   * Config backup on each save, tooltips on key controls
+;   * Bug fixes: process priority mapping, log-tail trim
 ; ============================================================================
 
 #Requires AutoHotkey v2.0
@@ -29,32 +22,41 @@ Persistent()
 SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
-global APP_NAME       := "Roblox Auto-Reconnect V3.0"
-global APP_VERSION    := "3.0.0"
-global APP_AUTHOR     := "INNIE (V3 Enhanced Edition)"
+global APP_NAME       := "Roblox Auto-Reconnect V3.1"
+global APP_VERSION    := "3.1.0"
+global APP_AUTHOR     := "INNIE (V3.1 Audit + Feature Pack)"
+global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
 global CONFIG_FILE    := DATA_DIR . "\config.ini"
 global PROFILES_FILE  := DATA_DIR . "\profiles.ini"
 global STATS_FILE     := DATA_DIR . "\stats.ini"
 global LOG_FILE       := DATA_DIR . "\app.log"
+global CONFIG_BACKUP_DIR := DATA_DIR . "\config-backups"
 global LOG_MAX_BYTES  := 512 * 1024  ; rotate at 512 KB
+global MAX_LOG_VIEW_LINES := 500
 
 ; ====== State ======
-global Profiles           := []   ; array of Maps: name, type, link, gameId, notes
+global Profiles           := []   ; array of Maps: name, type, link, gameId, notes, fav
 global ActiveProfileIdx   := 1
 global IsMonitoringActive := false
 global IsAntiAfkActive    := false
+global IsAntiAfkPaused    := false  ; transient pause during reconnect
 global ReconnectAttempts  := 0
 global LastReconnectTime  := 0
 global SessionStart       := A_TickCount
 global LifetimeReconnects := 0
 global LifetimeCrashes    := 0
 global LifetimeSessions   := 0
+global SuccessfulReconnects := 0      ; this session (for success rate)
+global FailedReconnects     := 0
 global CheckTimer         := ""
 global RejoinTimer        := ""
 global AntiAfkTimer       := ""
 global StopAtTimer        := ""
 global SleepPreventTimer  := ""
+global BatteryCheckTimer  := ""
+global VipMasked          := true     ; UI: VIP links shown as ••• until reveal
+global ProfileFilterText  := ""
 
 ; ====== Config (populated by LoadConfig) ======
 global Cfg := Map(
@@ -78,9 +80,11 @@ global Cfg := Map(
     "AntiAfkJitterSec",    30,
     "AntiAfkKey",          "Space",
     "AntiAfkOnlyFocused",  true,
+    "AntiAfkPauseDuringReconnect", true,
     "SoundEnabled",        false,
     "SoundOnConnect",      "",
     "SoundOnDisconnect",   "",
+    "SoundVolume",         100,            ; 0-100
     "DiscordEnabled",      false,
     "DiscordWebhook",      "",
     "NotifyOnConnect",     true,
@@ -97,7 +101,26 @@ global Cfg := Map(
     "LogLevel",            "Info",         ; Debug, Info, Warn, Error
     "LogToFile",           true,
     "StartMonitoringOnLaunch", false,
-    "ActiveProfile",       1
+    "ActiveProfile",       1,
+    ; --- V3.1 additions ---
+    "RotateProfiles",      false,
+    "StopAfterReconnects", 0,              ; 0 = unlimited (lifetime safety cap)
+    "PauseOnBattery",      false,
+    "MaskVipLinks",        true,
+    "HideLinksInLogs",     true,
+    "BackupConfigOnSave",  true,
+    "RememberWindowPos",   true,
+    "WindowX",             -1,             ; -1 = unset
+    "WindowY",             -1,
+    "WindowW",             580,
+    "WindowH",             580,
+    "Hotkey_ToggleMonitor","F1",
+    "Hotkey_Reconnect",    "F2",
+    "Hotkey_Minimize",     "F3",
+    "Hotkey_AntiAfk",      "F4",
+    "Hotkey_Emergency",    "^+r",
+    "Hotkey_Panic",        "^+q",
+    "AutoUpdateCheck",     true
 )
 
 ; ====== Bootstrap ======
@@ -166,32 +189,47 @@ myGui.Add("Text", "x40 y335 w500 cGray",
 
 ; ---------- Servers Tab ----------
 Tab.UseTab(2)
-myGui.Add("GroupBox", "x20 y40 w520 h250", "Server Profiles")
-ProfilesLV := myGui.Add("ListView", "x30 y65 w500 h200 Grid -Multi vProfileLV",
-    ["#", "Name", "Type", "Target", "Notes"])
+myGui.Add("GroupBox", "x20 y40 w520 h270", "Server Profiles")
+
+myGui.Add("Text", "x30 y65 w50", "Filter:")
+ProfileFilterEdit := myGui.Add("Edit", "x80 y62 w200 h22")
+ProfileFilterEdit.OnEvent("Change", (*) => RefreshProfilesLV())
+ImportProfBtn := myGui.Add("Button", "x290 y61 w110 h22", "Import…")
+ImportProfBtn.OnEvent("Click", (*) => ImportProfilesJson())
+ExportProfBtn := myGui.Add("Button", "x405 y61 w110 h22", "Export…")
+ExportProfBtn.OnEvent("Click", (*) => ExportProfilesJson())
+
+ProfilesLV := myGui.Add("ListView", "x30 y90 w500 h195 Grid -Multi vProfileLV",
+    ["#", "★", "Name", "Type", "Target", "Notes"])
 ProfilesLV.OnEvent("DoubleClick", (*) => EditProfile())
 ProfilesLV.OnEvent("ItemSelect", (*) => UpdateProfileButtons())
 
-AddProfBtn := myGui.Add("Button", "x30 y275 w80 h24", "Add")
+AddProfBtn := myGui.Add("Button", "x30 y293 w70 h24", "Add")
 AddProfBtn.OnEvent("Click", (*) => AddProfile())
-EditProfBtn := myGui.Add("Button", "x115 y275 w80 h24", "Edit")
+EditProfBtn := myGui.Add("Button", "x105 y293 w70 h24", "Edit")
 EditProfBtn.OnEvent("Click", (*) => EditProfile())
-DupProfBtn := myGui.Add("Button", "x200 y275 w80 h24", "Duplicate")
+DupProfBtn := myGui.Add("Button", "x180 y293 w70 h24", "Duplicate")
 DupProfBtn.OnEvent("Click", (*) => DuplicateProfile())
-DelProfBtn := myGui.Add("Button", "x285 y275 w80 h24", "Delete")
+DelProfBtn := myGui.Add("Button", "x255 y293 w70 h24", "Delete")
 DelProfBtn.OnEvent("Click", (*) => DeleteProfile())
-SetActiveBtn := myGui.Add("Button", "x370 y275 w100 h24", "Set Active")
+SetActiveBtn := myGui.Add("Button", "x330 y293 w80 h24", "Set Active")
 SetActiveBtn.OnEvent("Click", (*) => SetActiveFromLV())
-TestProfBtn := myGui.Add("Button", "x475 y275 w55 h24", "Test")
+FavBtn := myGui.Add("Button", "x415 y293 w55 h24", "★ Fav")
+FavBtn.OnEvent("Click", (*) => ToggleFavSelected())
+TestProfBtn := myGui.Add("Button", "x475 y293 w55 h24", "Test")
 TestProfBtn.OnEvent("Click", (*) => TestSelectedProfile())
 
-myGui.Add("GroupBox", "x20 y310 w520 h120", "Quick Actions on Active Profile")
-CopyLinkBtn := myGui.Add("Button", "x40 y335 w130 h28", "📋 Copy Link")
+myGui.Add("GroupBox", "x20 y325 w520 h105", "Quick Actions on Active Profile")
+CopyLinkBtn := myGui.Add("Button", "x40 y350 w120 h26", "📋 Copy Link")
 CopyLinkBtn.OnEvent("Click", (*) => CopyActiveLink())
-OpenBrowserBtn := myGui.Add("Button", "x180 y335 w160 h28", "🌐 Open in Browser")
+OpenBrowserBtn := myGui.Add("Button", "x170 y350 w150 h26", "🌐 Open in Browser")
 OpenBrowserBtn.OnEvent("Click", (*) => OpenActiveInBrowser())
-RandomProfBtn := myGui.Add("Button", "x350 y335 w180 h28", "🎲 Pick Random Profile")
+RandomProfBtn := myGui.Add("Button", "x330 y350 w160 h26", "🎲 Pick Random Profile")
 RandomProfBtn.OnEvent("Click", (*) => PickRandomProfile())
+RotateProfilesCheck := myGui.Add("Checkbox", "x40 y385 w280", "Rotate profiles on each reconnect")
+RotateProfilesCheck.Value := Cfg["RotateProfiles"] ? 1 : 0
+RevealLinkBtn := myGui.Add("Button", "x330 y383 w160 h22", "👁 Toggle reveal links")
+RevealLinkBtn.OnEvent("Click", (*) => ToggleVipReveal())
 
 ; ---------- Window Tab ----------
 Tab.UseTab(3)
@@ -246,7 +284,10 @@ myGui.Add("Text", "x425 y155 w80", "seconds")
 AntiAfkFocusCheck := myGui.Add("Checkbox", "x40 y185 w400", "Only run when Roblox window is focused")
 AntiAfkFocusCheck.Value := Cfg["AntiAfkOnlyFocused"] ? 1 : 0
 
-AntiAfkTestBtn := myGui.Add("Button", "x40 y220 w200 h28", "🕹 Test Anti-AFK Once")
+AntiAfkPauseReconCheck := myGui.Add("Checkbox", "x40 y210 w400", "Pause Anti-AFK during a reconnect")
+AntiAfkPauseReconCheck.Value := Cfg["AntiAfkPauseDuringReconnect"] ? 1 : 0
+
+AntiAfkTestBtn := myGui.Add("Button", "x40 y240 w200 h28", "🕹 Test Anti-AFK Once")
 AntiAfkTestBtn.OnEvent("Click", (*) => DoAntiAfkAction(true))
 
 ; ---------- Alerts Tab ----------
@@ -267,11 +308,13 @@ myGui.Add("GroupBox", "x20 y210 w520 h90", "Sound Alerts")
 SoundCheck := myGui.Add("Checkbox", "x40 y235 w300", "Enable sound alerts")
 SoundCheck.Value := Cfg["SoundEnabled"] ? 1 : 0
 myGui.Add("Text", "x40 y265 w100", "Connect .wav:")
-SoundConnectEdit := myGui.Add("Edit", "x140 y262 w280 h22", Cfg["SoundOnConnect"])
-BrowseSoundConnBtn := myGui.Add("Button", "x425 y261 w50 h22", "…")
+SoundConnectEdit := myGui.Add("Edit", "x140 y262 w220 h22", Cfg["SoundOnConnect"])
+BrowseSoundConnBtn := myGui.Add("Button", "x365 y261 w35 h22", "…")
 BrowseSoundConnBtn.OnEvent("Click", (*) => BrowseSoundFile(SoundConnectEdit))
-TestSoundBtn := myGui.Add("Button", "x480 y261 w55 h22", "Play")
+TestSoundBtn := myGui.Add("Button", "x405 y261 w45 h22", "Play")
 TestSoundBtn.OnEvent("Click", (*) => PlaySoundFile(SoundConnectEdit.Text))
+myGui.Add("Text", "x455 y265 w30", "Vol:")
+SoundVolSlider := myGui.Add("Slider", "x485 y262 w50 Range0-100 ToolTip", Cfg["SoundVolume"])
 
 myGui.Add("GroupBox", "x20 y310 w520 h100", "Discord Webhook")
 DiscordCheck := myGui.Add("Checkbox", "x40 y335 w300", "Send alerts to Discord webhook")
@@ -294,7 +337,7 @@ myGui.Add("Text", "x330 y95 w60", "minutes")
 myGui.Add("Text", "x40 y130 w500 cGray",
     "Tip: Use auto-rejoin to stay on a fresh server instance. It will force-close and relaunch Roblox.")
 
-myGui.Add("GroupBox", "x20 y210 w520 h180", "Startup & Shutdown")
+myGui.Add("GroupBox", "x20 y210 w520 h220", "Startup & Shutdown")
 AutoStartWinCheck := myGui.Add("Checkbox", "x40 y235 w400", "Start " . APP_NAME . " with Windows")
 AutoStartWinCheck.Value := Cfg["AutoStartWithWindows"] ? 1 : 0
 AutoStartWinCheck.OnEvent("Click", (*) => SetAutoStartWithWindows(AutoStartWinCheck.Value = 1))
@@ -311,8 +354,14 @@ myGui.Add("Text", "x40 y345 w120", "Stop at time:")
 StopAtEdit := myGui.Add("Edit", "x160 y342 w80 h22", Cfg["StopAtHHMM"])
 myGui.Add("Text", "x245 y345 w300 cGray", "Format HH:MM (24h), blank to disable")
 
-PreventSleepCheck := myGui.Add("Checkbox", "x40 y375 w400", "Prevent system sleep while monitoring")
+PreventSleepCheck := myGui.Add("Checkbox", "x40 y375 w300", "Prevent system sleep while monitoring")
 PreventSleepCheck.Value := Cfg["PreventSleep"] ? 1 : 0
+PauseOnBatteryCheck := myGui.Add("Checkbox", "x310 y375 w220", "Pause monitoring when on battery")
+PauseOnBatteryCheck.Value := Cfg["PauseOnBattery"] ? 1 : 0
+
+myGui.Add("Text", "x40 y400 w160", "Stop after N reconnects:")
+StopAfterReconEdit := myGui.Add("Edit", "x205 y397 w60 h22 Number", Cfg["StopAfterReconnects"])
+myGui.Add("Text", "x270 y400 w260 cGray", "0 = unlimited (lifetime safety cap)")
 
 ; ---------- Stats Tab ----------
 Tab.UseTab(7)
@@ -322,57 +371,83 @@ RefreshStatsBtn := myGui.Add("Button", "x30 y390 w120 h28", "🔄 Refresh")
 RefreshStatsBtn.OnEvent("Click", (*) => RefreshStats())
 ResetStatsBtn := myGui.Add("Button", "x160 y390 w150 h28", "🧹 Reset Lifetime Stats")
 ResetStatsBtn.OnEvent("Click", (*) => ResetLifetimeStats())
+ExportStatsCsvBtn := myGui.Add("Button", "x320 y390 w150 h28", "📊 Export Stats CSV")
+ExportStatsCsvBtn.OnEvent("Click", (*) => ExportStatsCsv())
 
 ; ---------- Logs Tab ----------
 Tab.UseTab(8)
 myGui.Add("GroupBox", "x20 y40 w520 h350", "Activity Log")
 LogText := myGui.Add("Edit", "x30 y65 w500 h310 ReadOnly VScroll -Wrap", "")
-myGui.Add("Text", "x30 y380 w60", "Filter:")
-LogFilterDDL := myGui.Add("DropDownList", "x90 y377 w100", ["All", "Info", "Warn", "Error"])
+myGui.Add("Text", "x30 y380 w50", "Search:")
+LogSearchEdit := myGui.Add("Edit", "x80 y377 w140 h22")
+LogSearchEdit.OnEvent("Change", (*) => RefreshLogView())
+LogFilterDDL := myGui.Add("DropDownList", "x225 y377 w90", ["All", "Info", "Warn", "Error"])
 LogFilterDDL.Text := "All"
 LogFilterDDL.OnEvent("Change", (*) => RefreshLogView())
-ClearLogBtn := myGui.Add("Button", "x200 y376 w80 h24", "Clear")
+ClearLogBtn := myGui.Add("Button", "x320 y376 w55 h24", "Clear")
 ClearLogBtn.OnEvent("Click", (*) => ClearLogView())
-CopyLogBtn := myGui.Add("Button", "x285 y376 w80 h24", "Copy")
+CopyLogBtn := myGui.Add("Button", "x380 y376 w55 h24", "Copy")
 CopyLogBtn.OnEvent("Click", (*) => CopyLogToClipboard())
-ExportLogBtn := myGui.Add("Button", "x370 y376 w80 h24", "Export")
+ExportLogBtn := myGui.Add("Button", "x440 y376 w50 h24", "Export")
 ExportLogBtn.OnEvent("Click", (*) => ExportLog())
-OpenLogFileBtn := myGui.Add("Button", "x455 y376 w80 h24", "Open File")
+OpenLogFileBtn := myGui.Add("Button", "x495 y376 w55 h24", "File")
 OpenLogFileBtn.OnEvent("Click", (*) => OpenLogFile())
 
 ; ---------- Settings Tab ----------
 Tab.UseTab(9)
-myGui.Add("GroupBox", "x20 y40 w520 h160", "Window & Behaviour")
-MinToTrayCheck := myGui.Add("Checkbox", "x40 y65 w400", "Minimize to tray instead of taskbar")
+myGui.Add("GroupBox", "x20 y40 w520 h130", "Window & Behaviour")
+MinToTrayCheck := myGui.Add("Checkbox", "x40 y65 w250", "Minimize to tray instead of taskbar")
 MinToTrayCheck.Value := Cfg["MinimizeToTray"] ? 1 : 0
-AlwaysTopGuiCheck := myGui.Add("Checkbox", "x40 y90 w400", "Keep this window always-on-top")
+AlwaysTopGuiCheck := myGui.Add("Checkbox", "x300 y65 w230", "Keep this window always-on-top")
 AlwaysTopGuiCheck.Value := Cfg["AlwaysOnTopGui"] ? 1 : 0
 AlwaysTopGuiCheck.OnEvent("Click", (*) => ApplyAlwaysOnTopGui())
+RememberPosCheck := myGui.Add("Checkbox", "x40 y90 w250", "Remember window size && position")
+RememberPosCheck.Value := Cfg["RememberWindowPos"] ? 1 : 0
+AutoUpdateCheck := myGui.Add("Checkbox", "x300 y90 w230", "Check for updates on startup")
+AutoUpdateCheck.Value := Cfg["AutoUpdateCheck"] ? 1 : 0
 
-myGui.Add("Text", "x40 y120 w100", "Log level:")
-LogLevelDDL := myGui.Add("DropDownList", "x150 y117 w120", ["Debug", "Info", "Warn", "Error"])
+myGui.Add("Text", "x40 y120 w70", "Log level:")
+LogLevelDDL := myGui.Add("DropDownList", "x115 y117 w100", ["Debug", "Info", "Warn", "Error"])
 LogLevelDDL.Text := Cfg["LogLevel"]
-LogToFileCheck := myGui.Add("Checkbox", "x290 y120 w200", "Write log to file")
+LogToFileCheck := myGui.Add("Checkbox", "x230 y120 w130", "Write log to file")
 LogToFileCheck.Value := Cfg["LogToFile"] ? 1 : 0
+HideLinksCheck := myGui.Add("Checkbox", "x370 y120 w160", "Hide links in logs")
+HideLinksCheck.Value := Cfg["HideLinksInLogs"] ? 1 : 0
+MaskVipCheck := myGui.Add("Checkbox", "x40 y145 w250", "Mask VIP links in UI (click-to-reveal)")
+MaskVipCheck.Value := Cfg["MaskVipLinks"] ? 1 : 0
+BackupCfgCheck := myGui.Add("Checkbox", "x300 y145 w230", "Back up config on every save")
+BackupCfgCheck.Value := Cfg["BackupConfigOnSave"] ? 1 : 0
 
-myGui.Add("GroupBox", "x20 y210 w520 h180", "Config Management")
-SaveCfgBtn := myGui.Add("Button", "x40 y235 w140 h28", "💾 Save Settings")
+myGui.Add("GroupBox", "x20 y180 w520 h60", "Hotkeys")
+HotkeysSummary := myGui.Add("Text", "x40 y200 w400 cGray", "")
+RebindHotkeysBtn := myGui.Add("Button", "x440 y198 w90 h24", "Rebind…")
+RebindHotkeysBtn.OnEvent("Click", (*) => HotkeyRebindDialog())
+
+myGui.Add("GroupBox", "x20 y250 w520 h70", "Diagnostics")
+SelfTestBtn := myGui.Add("Button", "x40 y270 w120 h28", "🩺 Self-test")
+SelfTestBtn.OnEvent("Click", (*) => RunSelfTest())
+RobloxStatusBtn := myGui.Add("Button", "x170 y270 w160 h28", "📡 Check Roblox Status")
+RobloxStatusBtn.OnEvent("Click", (*) => CheckRobloxStatus(true))
+CheckUpdatesBtn := myGui.Add("Button", "x340 y270 w180 h28", "⬆ Check for Updates Now")
+CheckUpdatesBtn.OnEvent("Click", (*) => CheckForUpdates(true))
+
+myGui.Add("GroupBox", "x20 y330 w520 h95", "Config Management")
+SaveCfgBtn := myGui.Add("Button", "x40 y353 w120 h26", "💾 Save Settings")
 SaveCfgBtn.OnEvent("Click", (*) => (PullCfgFromGui(), SaveConfig(), Log("Settings saved", "Info"), MsgBox("Settings saved!", APP_NAME, 64)))
-ReloadCfgBtn := myGui.Add("Button", "x190 y235 w140 h28", "🔃 Reload from Disk")
+ReloadCfgBtn := myGui.Add("Button", "x170 y353 w130 h26", "🔃 Reload from Disk")
 ReloadCfgBtn.OnEvent("Click", (*) => (LoadConfig(), PushCfgToGui(), Log("Settings reloaded", "Info")))
-ExportCfgBtn := myGui.Add("Button", "x340 y235 w100 h28", "📤 Export")
+ExportCfgBtn := myGui.Add("Button", "x310 y353 w90 h26", "📤 Export")
 ExportCfgBtn.OnEvent("Click", (*) => ExportConfig())
-ImportCfgBtn := myGui.Add("Button", "x445 y235 w90 h28", "📥 Import")
+ImportCfgBtn := myGui.Add("Button", "x405 y353 w85 h26", "📥 Import")
 ImportCfgBtn.OnEvent("Click", (*) => ImportConfig())
-
-ResetBtn := myGui.Add("Button", "x40 y275 w250 h28", "↺ Reset All Settings to Defaults")
+ResetBtn := myGui.Add("Button", "x40 y388 w200 h26", "↺ Reset All to Defaults")
 ResetBtn.OnEvent("Click", (*) => ResetDefaults())
-OpenDataDirBtn := myGui.Add("Button", "x300 y275 w140 h28", "📁 Open Data Folder")
+OpenDataDirBtn := myGui.Add("Button", "x250 y388 w140 h26", "📁 Open Data Folder")
 OpenDataDirBtn.OnEvent("Click", (*) => Run(DATA_DIR))
-AboutBtn := myGui.Add("Button", "x450 y275 w85 h28", "ℹ About")
+AboutBtn := myGui.Add("Button", "x400 y388 w90 h26", "ℹ About")
 AboutBtn.OnEvent("Click", (*) => ShowAbout())
 
-myGui.Add("Text", "x40 y320 w500 cGray",
+myGui.Add("Text", "x40 y430 w500 cGray",
     APP_NAME . " by " . APP_AUTHOR . "  •  Data dir: " . DATA_DIR)
 
 ; ---------- End Tabs ----------
@@ -388,6 +463,8 @@ UpdateProfileButtons()
 RefreshStats()
 RefreshLogView()
 ApplyAlwaysOnTopGui()
+RefreshHotkeysSummary()
+InstallTooltips()
 
 ; ====== Tray Menu ======
 A_TrayMenu.Delete()
@@ -404,18 +481,14 @@ A_TrayMenu.Default := "Show Window"
 A_IconTip := APP_NAME . " (idle)"
 
 ; ====== Hotkeys ======
-HotKey("F1", (*) => ToggleMonitoring())
-HotKey("F2", (*) => ManualReconnect())
-HotKey("F3", (*) => MinimizeRobloxWindows())
-HotKey("F4", (*) => ToggleAntiAfk(!IsAntiAfkActive))
-HotKey("^+r", (*) => EmergencyReconnect())
-HotKey("^+q", (*) => PanicStop())
+RegisterHotkeys()
 
 ; ====== Show / Launch ======
+ShowOpts := BuildShowOptions()
 if (Cfg["StartMinimized"] && Cfg["MinimizeToTray"]) {
-    myGui.Show("Hide w580 h580")
+    myGui.Show("Hide " . ShowOpts)
 } else {
-    myGui.Show("w580 h580")
+    myGui.Show(ShowOpts)
 }
 
 Log("=== " . APP_NAME . " started ===", "Info")
@@ -423,6 +496,10 @@ Log("Data folder: " . DATA_DIR, "Debug")
 
 ; Apply scheduling
 ApplyStopAtTimer()
+ApplyBatteryWatcher()
+
+if (Cfg["AutoUpdateCheck"])
+    SetTimer(() => CheckForUpdates(false), -3000)
 
 if (Cfg["DelayedStartSec"] > 0 && Cfg["StartMonitoringOnLaunch"]) {
     SetTimer(() => StartMonitoring(), -1 * Cfg["DelayedStartSec"] * 1000)
@@ -452,19 +529,20 @@ LoadConfig() {
     global Cfg, CONFIG_FILE, ActiveProfileIdx
     if (!FileExist(CONFIG_FILE))
         return
-    for key, default in Cfg.Clone() {
+    for key, defaultVal in Cfg.Clone() {
         try {
             val := IniRead(CONFIG_FILE, "Config", key, "__MISSING__")
             if (val = "__MISSING__")
                 continue
-            if (default is Integer)
-                Cfg[key] := Integer(val)
-            else if (default is Float)
-                Cfg[key] := Float(val)
-            else if (default is Number)
-                Cfg[key] := val + 0
-            else if (default = true || default = false)
+            ; bool BEFORE int (false/true are also Integers in v2)
+            if (defaultVal == true || defaultVal == false)
                 Cfg[key] := (val = "1" || val = "true" || val = "True")
+            else if (defaultVal is Integer)
+                Cfg[key] := Integer(val)
+            else if (defaultVal is Float)
+                Cfg[key] := Float(val)
+            else if (defaultVal is Number)
+                Cfg[key] := val + 0
             else
                 Cfg[key] := val
         } catch Error as e {
@@ -480,13 +558,50 @@ SaveConfig() {
     global Cfg, CONFIG_FILE, ActiveProfileIdx
     EnsureDataDir()
     Cfg["ActiveProfile"] := ActiveProfileIdx
+    if (Cfg["BackupConfigOnSave"] && FileExist(CONFIG_FILE))
+        BackupConfigFile()
     for key, val in Cfg {
         try {
-            s := (val = true) ? "1" : (val = false) ? "0" : val
+            if (val == true)
+                s := "1"
+            else if (val == false)
+                s := "0"
+            else
+                s := val
             IniWrite(s, CONFIG_FILE, "Config", key)
         } catch Error as e {
             ; ignore
         }
+    }
+}
+
+BackupConfigFile() {
+    global CONFIG_FILE, CONFIG_BACKUP_DIR
+    try {
+        if (!DirExist(CONFIG_BACKUP_DIR))
+            DirCreate(CONFIG_BACKUP_DIR)
+        ts := FormatTime(, "yyyyMMdd-HHmmss")
+        FileCopy(CONFIG_FILE, CONFIG_BACKUP_DIR . "\config-" . ts . ".ini", 1)
+        ; Prune to last 20 backups
+        files := []
+        Loop Files, CONFIG_BACKUP_DIR . "\config-*.ini"
+            files.Push({path: A_LoopFilePath, time: A_LoopFileTimeModified})
+        if (files.Length > 20) {
+            ; sort ascending by time, delete oldest
+            Loop files.Length - 1 {
+                i := A_Index
+                Loop files.Length - i {
+                    j := A_Index
+                    if (files[j].time > files[j+1].time) {
+                        tmp := files[j], files[j] := files[j+1], files[j+1] := tmp
+                    }
+                }
+            }
+            Loop files.Length - 20
+                try FileDelete(files[A_Index].path)
+        }
+    } catch Error as e {
+        ; ignore
     }
 }
 
@@ -505,7 +620,8 @@ LoadProfiles() {
                 "type",   IniRead(PROFILES_FILE, section, "Type",   "private"),
                 "link",   IniRead(PROFILES_FILE, section, "Link",   ""),
                 "gameId", IniRead(PROFILES_FILE, section, "GameId", ""),
-                "notes",  IniRead(PROFILES_FILE, section, "Notes",  "")
+                "notes",  IniRead(PROFILES_FILE, section, "Notes",  ""),
+                "fav",    IniRead(PROFILES_FILE, section, "Fav",    "0") = "1"
             )
             Profiles.Push(p)
         }
@@ -532,6 +648,7 @@ SaveProfiles() {
             IniWrite(p["link"],   PROFILES_FILE, section, "Link")
             IniWrite(p["gameId"], PROFILES_FILE, section, "GameId")
             IniWrite(p["notes"],  PROFILES_FILE, section, "Notes")
+            IniWrite(p.Has("fav") && p["fav"] ? "1" : "0", PROFILES_FILE, section, "Fav")
         }
     } catch Error as e {
         Log("Error saving profiles: " . e.Message, "Error")
@@ -596,8 +713,10 @@ PullCfgFromGui() {
     Cfg["AntiAfkJitterSec"]    := Integer(AntiAfkJitterEdit.Text)
     Cfg["AntiAfkKey"]          := AntiAfkKeyDDL.Text
     Cfg["AntiAfkOnlyFocused"]  := (AntiAfkFocusCheck.Value = 1)
+    Cfg["AntiAfkPauseDuringReconnect"] := (AntiAfkPauseReconCheck.Value = 1)
     Cfg["SoundEnabled"]        := (SoundCheck.Value = 1)
     Cfg["SoundOnConnect"]      := SoundConnectEdit.Text
+    Cfg["SoundVolume"]         := Integer(SoundVolSlider.Value)
     Cfg["DiscordEnabled"]      := (DiscordCheck.Value = 1)
     Cfg["DiscordWebhook"]      := DiscordUrlEdit.Text
     Cfg["NotifyOnConnect"]     := (NotifyConnCheck.Value = 1)
@@ -611,12 +730,20 @@ PullCfgFromGui() {
     Cfg["DelayedStartSec"]     := Integer(DelayedStartEdit.Text)
     Cfg["StopAtHHMM"]          := StopAtEdit.Text
     Cfg["PreventSleep"]        := (PreventSleepCheck.Value = 1)
+    Cfg["PauseOnBattery"]      := (PauseOnBatteryCheck.Value = 1)
+    Cfg["StopAfterReconnects"] := Integer(StopAfterReconEdit.Text)
     Cfg["LogLevel"]            := LogLevelDDL.Text
     Cfg["LogToFile"]           := (LogToFileCheck.Value = 1)
+    Cfg["HideLinksInLogs"]     := (HideLinksCheck.Value = 1)
+    Cfg["MaskVipLinks"]        := (MaskVipCheck.Value = 1)
+    Cfg["BackupConfigOnSave"]  := (BackupCfgCheck.Value = 1)
+    Cfg["RememberWindowPos"]   := (RememberPosCheck.Value = 1)
+    Cfg["AutoUpdateCheck"]     := (AutoUpdateCheck.Value = 1)
     Cfg["StartMonitoringOnLaunch"] := (StartMonOnLaunchCheck.Value = 1)
     Cfg["AutoRejoinEnabled"]   := (AutoRejoinCheck.Value = 1)
     Cfg["RejoinHours"]         := Integer(RejoinHoursEdit.Text)
     Cfg["RejoinMinutes"]       := Integer(RejoinMinsEdit.Text)
+    Cfg["RotateProfiles"]      := (RotateProfilesCheck.Value = 1)
 }
 
 PushCfgToGui() {
@@ -638,8 +765,10 @@ PushCfgToGui() {
     AntiAfkJitterEdit.Text    := Cfg["AntiAfkJitterSec"]
     AntiAfkKeyDDL.Text        := Cfg["AntiAfkKey"]
     AntiAfkFocusCheck.Value   := Cfg["AntiAfkOnlyFocused"] ? 1 : 0
+    AntiAfkPauseReconCheck.Value := Cfg["AntiAfkPauseDuringReconnect"] ? 1 : 0
     SoundCheck.Value          := Cfg["SoundEnabled"] ? 1 : 0
     SoundConnectEdit.Text     := Cfg["SoundOnConnect"]
+    SoundVolSlider.Value      := Cfg["SoundVolume"]
     DiscordCheck.Value        := Cfg["DiscordEnabled"] ? 1 : 0
     DiscordUrlEdit.Text       := Cfg["DiscordWebhook"]
     NotifyConnCheck.Value     := Cfg["NotifyOnConnect"] ? 1 : 0
@@ -653,12 +782,21 @@ PushCfgToGui() {
     DelayedStartEdit.Text     := Cfg["DelayedStartSec"]
     StopAtEdit.Text           := Cfg["StopAtHHMM"]
     PreventSleepCheck.Value   := Cfg["PreventSleep"] ? 1 : 0
+    PauseOnBatteryCheck.Value := Cfg["PauseOnBattery"] ? 1 : 0
+    StopAfterReconEdit.Text   := Cfg["StopAfterReconnects"]
     LogLevelDDL.Text          := Cfg["LogLevel"]
     LogToFileCheck.Value      := Cfg["LogToFile"] ? 1 : 0
+    HideLinksCheck.Value      := Cfg["HideLinksInLogs"] ? 1 : 0
+    MaskVipCheck.Value        := Cfg["MaskVipLinks"] ? 1 : 0
+    BackupCfgCheck.Value      := Cfg["BackupConfigOnSave"] ? 1 : 0
+    RememberPosCheck.Value    := Cfg["RememberWindowPos"] ? 1 : 0
+    AutoUpdateCheck.Value     := Cfg["AutoUpdateCheck"] ? 1 : 0
     StartMonOnLaunchCheck.Value := Cfg["StartMonitoringOnLaunch"] ? 1 : 0
     AutoRejoinCheck.Value     := Cfg["AutoRejoinEnabled"] ? 1 : 0
     RejoinHoursEdit.Text      := Cfg["RejoinHours"]
     RejoinMinsEdit.Text       := Cfg["RejoinMinutes"]
+    RotateProfilesCheck.Value := Cfg["RotateProfiles"] ? 1 : 0
+    RefreshHotkeysSummary()
 }
 
 ExportConfig() {
@@ -703,16 +841,24 @@ ResetDefaults() {
         "BrowserList","chrome.exe,firefox.exe,msedge.exe,opera.exe,brave.exe,vivaldi.exe,iexplore.exe",
         "AntiAfkEnabled",false, "AntiAfkMethod","Mouse", "AntiAfkIntervalSec",120,
         "AntiAfkJitterSec",30, "AntiAfkKey","Space", "AntiAfkOnlyFocused",true,
-        "SoundEnabled",false, "SoundOnConnect","", "SoundOnDisconnect","",
+        "AntiAfkPauseDuringReconnect",true,
+        "SoundEnabled",false, "SoundOnConnect","", "SoundOnDisconnect","", "SoundVolume",100,
         "DiscordEnabled",false, "DiscordWebhook","",
         "NotifyOnConnect",true, "NotifyOnDisconnect",true, "NotifyOnError",true,
         "TrayNotifications",true, "MinimizeToTray",true, "StartMinimized",false,
         "AlwaysOnTopGui",false, "AutoStartWithWindows",false, "DelayedStartSec",0,
         "StopAtHHMM","", "PreventSleep",true, "LogLevel","Info", "LogToFile",true,
-        "StartMonitoringOnLaunch",false, "ActiveProfile",1
+        "StartMonitoringOnLaunch",false, "ActiveProfile",1,
+        "RotateProfiles",false, "StopAfterReconnects",0, "PauseOnBattery",false,
+        "MaskVipLinks",true, "HideLinksInLogs",true, "BackupConfigOnSave",true,
+        "RememberWindowPos",true, "WindowX",-1, "WindowY",-1, "WindowW",580, "WindowH",580,
+        "Hotkey_ToggleMonitor","F1", "Hotkey_Reconnect","F2", "Hotkey_Minimize","F3",
+        "Hotkey_AntiAfk","F4", "Hotkey_Emergency","^+r", "Hotkey_Panic","^+q",
+        "AutoUpdateCheck",true
     )
     SaveConfig()
     PushCfgToGui()
+    RegisterHotkeys()
     Log("Settings reset to defaults", "Warn")
 }
 
@@ -812,14 +958,63 @@ RefreshProfileDropDown() {
 RefreshProfilesLV() {
     global Profiles
     ProfilesLV.Delete()
+    filter := ""
+    try filter := ProfileFilterEdit.Text
+    filterLower := StrLower(filter)
     for i, p in Profiles {
-        target := p["type"] = "private" ? p["link"] : "Game " . p["gameId"]
+        if (filterLower != "") {
+            hay := StrLower(p["name"] . " " . p["type"] . " " . p["notes"] . " " . p["link"] . " " . p["gameId"])
+            if (!InStr(hay, filterLower))
+                continue
+        }
+        target := p["type"] = "private" ? MaskVipForView(p["link"]) : "Game " . p["gameId"]
         if (StrLen(target) > 60)
             target := SubStr(target, 1, 57) . "..."
-        ProfilesLV.Add(, i, p["name"], p["type"], target, p["notes"])
+        star := (p.Has("fav") && p["fav"]) ? "★" : ""
+        ProfilesLV.Add(, i, star, p["name"], p["type"], target, p["notes"])
     }
-    Loop 5
+    Loop 6
         ProfilesLV.ModifyCol(A_Index, "AutoHdr")
+}
+
+MaskVipForView(link) {
+    global Cfg, VipMasked
+    if (link = "")
+        return ""
+    if (Cfg.Has("MaskVipLinks") && Cfg["MaskVipLinks"] && VipMasked)
+        return "•••••••• [click 'reveal' to view]"
+    return link
+}
+
+ToggleVipReveal() {
+    global VipMasked
+    VipMasked := !VipMasked
+    RefreshProfilesLV()
+    StatusBar.SetText(VipMasked ? "VIP links masked" : "VIP links revealed")
+}
+
+ToggleFavSelected() {
+    row := ProfilesLV.GetNext(0)
+    if (!row)
+        return
+    realIdx := GetRealProfileIndex(row)
+    if (realIdx < 1)
+        return
+    p := Profiles[realIdx]
+    p["fav"] := !(p.Has("fav") && p["fav"])
+    Profiles[realIdx] := p
+    SaveProfiles()
+    RefreshProfilesLV()
+}
+
+GetRealProfileIndex(lvRow) {
+    ; The "#" column holds the real profile index (since filter may hide rows)
+    try {
+        idxText := ProfilesLV.GetText(lvRow, 1)
+        return Integer(idxText)
+    } catch Error as e {
+        return -1
+    }
 }
 
 UpdateProfileButtons() {
@@ -848,14 +1043,17 @@ SetActiveFromLV() {
     row := ProfilesLV.GetNext(0)
     if (!row)
         return
-    ActiveProfileIdx := row
+    real := GetRealProfileIndex(row)
+    if (real < 1)
+        return
+    ActiveProfileIdx := real
     RefreshProfileDropDown()
     SaveConfig()
-    Log("Active profile set to #" . row, "Info")
+    Log("Active profile set to #" . real, "Info")
 }
 
 AddProfile() {
-    p := ProfileDialog(Map("name", "New Profile", "type", "private", "link", "", "gameId", "", "notes", ""))
+    p := ProfileDialog(Map("name", "New Profile", "type", "private", "link", "", "gameId", "", "notes", "", "fav", false))
     if (!p)
         return
     Profiles.Push(p)
@@ -869,10 +1067,13 @@ EditProfile() {
     row := ProfilesLV.GetNext(0)
     if (!row)
         return
-    updated := ProfileDialog(Profiles[row])
+    real := GetRealProfileIndex(row)
+    if (real < 1)
+        return
+    updated := ProfileDialog(Profiles[real])
     if (!updated)
         return
-    Profiles[row] := updated
+    Profiles[real] := updated
     SaveProfiles()
     RefreshProfilesLV()
     RefreshProfileDropDown()
@@ -883,7 +1084,10 @@ DuplicateProfile() {
     row := ProfilesLV.GetNext(0)
     if (!row)
         return
-    p := Profiles[row].Clone()
+    real := GetRealProfileIndex(row)
+    if (real < 1)
+        return
+    p := Profiles[real].Clone()
     p["name"] := p["name"] . " (copy)"
     Profiles.Push(p)
     SaveProfiles()
@@ -896,22 +1100,28 @@ DeleteProfile() {
     row := ProfilesLV.GetNext(0)
     if (!row)
         return
-    if (MsgBox("Delete profile '" . Profiles[row]["name"] . "'?", APP_NAME, 4 + 48) != "Yes")
+    real := GetRealProfileIndex(row)
+    if (real < 1)
         return
-    Profiles.RemoveAt(row)
+    if (MsgBox("Delete profile '" . Profiles[real]["name"] . "'?", APP_NAME, 4 + 48) != "Yes")
+        return
+    Profiles.RemoveAt(real)
     if (ActiveProfileIdx > Profiles.Length)
         ActiveProfileIdx := Profiles.Length
     SaveProfiles()
     RefreshProfilesLV()
     RefreshProfileDropDown()
-    Log("Deleted profile #" . row, "Warn")
+    Log("Deleted profile #" . real, "Warn")
 }
 
 TestSelectedProfile() {
     row := ProfilesLV.GetNext(0)
     if (!row)
         return
-    p := Profiles[row]
+    real := GetRealProfileIndex(row)
+    if (real < 1)
+        return
+    p := Profiles[real]
     target := GetProfileTarget(p)
     if (p["type"] = "private" && !IsValidVipLink(p["link"])) {
         MsgBox("Invalid VIP link. Must start with https://www.roblox.com/ or roblox://", APP_NAME, 48)
@@ -977,6 +1187,8 @@ ProfileDialog(initial) {
     dlg.Add("Text", "x10 y40 w80", "Type:")
     typePrivR := dlg.Add("Radio", "x100 y40 w100 " . (initial["type"] = "private" ? "Checked" : ""), "Private/VIP")
     typePubR := dlg.Add("Radio", "x210 y40 w100 " . (initial["type"] = "public" ? "Checked" : ""), "Public")
+    favCheck := dlg.Add("Checkbox", "x320 y40 w100", "★ Favorite")
+    favCheck.Value := (initial.Has("fav") && initial["fav"]) ? 1 : 0
     dlg.Add("Text", "x10 y70 w80", "VIP Link:")
     linkE := dlg.Add("Edit", "x100 y68 w320 h22", initial["link"])
     dlg.Add("Text", "x10 y100 w80", "Game ID:")
@@ -1010,7 +1222,8 @@ ProfileDialog(initial) {
             MsgBox("Game ID must be digits only.", APP_NAME, 48)
             return
         }
-        result := Map("name", name, "type", type, "link", link, "gameId", gid, "notes", notesE.Text)
+        result := Map("name", name, "type", type, "link", link, "gameId", gid,
+            "notes", notesE.Text, "fav", favCheck.Value = 1)
         dlg.Destroy()
     }
     cancelClick(*) {
@@ -1203,7 +1416,12 @@ ManualReconnect(*) {
 }
 
 ReconnectToGame() {
-    global Cfg, LifetimeReconnects
+    global Cfg, LifetimeReconnects, Profiles, ActiveProfileIdx, IsAntiAfkPaused
+    global SuccessfulReconnects, FailedReconnects
+    if (Cfg["RotateProfiles"] && Profiles.Length > 1) {
+        ActiveProfileIdx := Mod(ActiveProfileIdx, Profiles.Length) + 1
+        try RefreshProfileDropDown()
+    }
     p := GetActiveProfile()
     if (!p) {
         Log("No active profile - cannot reconnect", "Error")
@@ -1223,6 +1441,8 @@ ReconnectToGame() {
         SetTimer(() => ReconnectToGame(), -15000)
         return
     }
+    if (Cfg["AntiAfkPauseDuringReconnect"] && IsAntiAfkActive)
+        IsAntiAfkPaused := true
     Log("Reconnecting to " . p["name"] . " ...", "Info")
     Notify("disconnect", APP_NAME, "Reconnecting to " . p["name"])
     try {
@@ -1243,19 +1463,36 @@ ReconnectToGame() {
                 Log("Roblox launched, waiting for load...", "Info")
                 Sleep(8000)
                 LifetimeReconnects += 1
+                SuccessfulReconnects += 1
                 SaveStats()
                 Log("Joined " . p["name"] . " successfully", "Info")
                 Notify("connect", APP_NAME, "Joined " . p["name"])
                 PostJoinHooks()
+                IsAntiAfkPaused := false
+                CheckLifetimeStopCap()
                 return
             }
             Sleep(1000)
         }
+        FailedReconnects += 1
         Log("Roblox did not start within 30s", "Error")
         Notify("error", APP_NAME, "Roblox did not start within 30s")
+        IsAntiAfkPaused := false
     } catch Error as e {
+        FailedReconnects += 1
         Log("Reconnect error: " . e.Message, "Error")
         Notify("error", APP_NAME, "Reconnect error: " . e.Message)
+        IsAntiAfkPaused := false
+    }
+}
+
+CheckLifetimeStopCap() {
+    global Cfg, SuccessfulReconnects
+    cap := Cfg["StopAfterReconnects"]
+    if (cap > 0 && SuccessfulReconnects >= cap) {
+        Log("Stop-after-N cap (" . cap . ") reached - stopping monitor", "Warn")
+        StopMonitoring()
+        Notify("error", APP_NAME, "Reconnect cap reached (" . cap . "). Monitoring stopped.")
     }
 }
 
@@ -1315,7 +1552,10 @@ SetRobloxAlwaysOnTop(on) {
 ApplyRobloxPriority(*) {
     global Cfg
     prio := Cfg["ProcessPriority"]
-    mapping := Map("Low", "Low", "Normal", "Normal", "High", "High")
+    ; AHK v2 ProcessSetPriority expects letter codes
+    mapping := Map("Low", "L", "Normal", "N", "High", "H")
+    if (!mapping.Has(prio))
+        prio := "Normal"
     try {
         wins := WinGetList("ahk_exe RobloxPlayerBeta.exe")
         for hwnd in wins {
@@ -1425,7 +1665,9 @@ AntiAfkTick() {
 }
 
 DoAntiAfkAction(manual) {
-    global Cfg
+    global Cfg, IsAntiAfkPaused
+    if (!manual && IsAntiAfkPaused)
+        return
     if (Cfg["AntiAfkOnlyFocused"] && !manual) {
         if (!WinActive("ahk_exe RobloxPlayerBeta.exe"))
             return
@@ -1484,10 +1726,19 @@ TrayNotify(title, message, level := "Info") {
 }
 
 PlaySoundFile(path) {
+    global Cfg
     if (path = "" || !FileExist(path))
         return
     try {
         SoundPlay(path)
+        ; Apply volume preference (best-effort, AHK v2)
+        try {
+            vol := Cfg.Has("SoundVolume") ? Cfg["SoundVolume"] : 100
+            if (vol < 100)
+                SoundSetVolume(vol)  ; system master; falls back silently
+        } catch Error as ev {
+            ;
+        }
     } catch Error as e {
         Log("Sound play error: " . e.Message, "Error")
     }
@@ -1549,6 +1800,8 @@ Log(message, level := "Info") {
     global Cfg, LOG_FILE, LOG_MAX_BYTES
     if (LogLevelRank(level) < LogLevelRank(Cfg["LogLevel"]))
         return
+    if (Cfg.Has("HideLinksInLogs") && Cfg["HideLinksInLogs"])
+        message := SanitizeForLog(message)
     ts := FormatTime(, "yyyy-MM-dd HH:mm:ss")
     line := "[" . ts . "] [" . level . "] " . message
     AppendLogToView(line)
@@ -1565,13 +1818,30 @@ Log(message, level := "Info") {
     }
 }
 
+SanitizeForLog(s) {
+    ; Replace VIP private-server URLs with redacted form
+    s := RegExReplace(s, "i)https?://(www\.)?roblox\.com/[^\s]*privateServer[^\s]*", "https://roblox.com/[REDACTED-VIP]")
+    s := RegExReplace(s, "i)roblox://[^\s]+", "roblox://[REDACTED]")
+    s := RegExReplace(s, "i)linkCode=[A-Za-z0-9_\-]+", "linkCode=[REDACTED]")
+    s := RegExReplace(s, "i)accessCode=[A-Za-z0-9_\-]+", "accessCode=[REDACTED]")
+    return s
+}
+
 AppendLogToView(line) {
-    global
+    global MAX_LOG_VIEW_LINES
     try {
         current := LogText.Text
         lines := StrSplit(current, "`n")
-        if (lines.Length > 500)
+        if (lines.Length > MAX_LOG_VIEW_LINES) {
+            ; Keep newest (MAX_LOG_VIEW_LINES - 50) lines from top (newest are prepended)
+            kept := []
+            keep := MAX_LOG_VIEW_LINES - 50
+            Loop Min(keep, lines.Length)
+                kept.Push(lines[A_Index])
             current := ""
+            for ln in kept
+                current .= ln . "`n"
+        }
         LogText.Text := line . "`n" . current
     } catch Error as e {
         ;
@@ -1586,10 +1856,16 @@ RefreshLogView() {
     try {
         content := FileRead(LOG_FILE)
         filter := LogFilterDDL.Text
+        searchTerm := ""
+        try searchTerm := LogSearchEdit.Text
+        searchLower := StrLower(searchTerm)
         out := ""
         Loop Parse, content, "`n", "`r" {
-            if (filter = "All" || InStr(A_LoopField, "[" . filter . "]"))
-                out := A_LoopField . "`n" . out
+            if (filter != "All" && !InStr(A_LoopField, "[" . filter . "]"))
+                continue
+            if (searchLower != "" && !InStr(StrLower(A_LoopField), searchLower))
+                continue
+            out := A_LoopField . "`n" . out
         }
         LogText.Text := out
     } catch Error as e {
@@ -1636,28 +1912,36 @@ OpenLogFile() {
 
 RefreshStats() {
     global SessionStart, ReconnectAttempts, LifetimeReconnects, LifetimeCrashes, LifetimeSessions
+    global SuccessfulReconnects, FailedReconnects
     uptimeMs := A_TickCount - SessionStart
     sessions := LifetimeSessions > 0 ? LifetimeSessions : 1
     avgPerSession := Round(LifetimeReconnects / sessions, 2)
+    totalAttempts := SuccessfulReconnects + FailedReconnects
+    successRate := totalAttempts > 0 ? Round(100.0 * SuccessfulReconnects / totalAttempts, 1) : 0
     s := ""
     s .= "=== Session ===`r`n"
-    s .= "Uptime:            " . FormatDuration(uptimeMs) . "`r`n"
-    s .= "Monitoring:        " . (IsMonitoringActive ? "ON" : "OFF") . "`r`n"
-    s .= "Anti-AFK:          " . (IsAntiAfkActive ? "ON" : "OFF") . "`r`n"
-    s .= "Reconnect attempts:" . ReconnectAttempts . "`r`n"
+    s .= "Uptime:             " . FormatDuration(uptimeMs) . "`r`n"
+    s .= "Monitoring:         " . (IsMonitoringActive ? "ON" : "OFF") . "`r`n"
+    s .= "Anti-AFK:           " . (IsAntiAfkActive ? (IsAntiAfkPaused ? "PAUSED" : "ON") : "OFF") . "`r`n"
+    s .= "Reconnect attempts: " . ReconnectAttempts . "`r`n"
+    s .= "Successful joins:   " . SuccessfulReconnects . "`r`n"
+    s .= "Failed joins:       " . FailedReconnects . "`r`n"
+    s .= "Success rate:       " . successRate . "%`r`n"
     s .= "`r`n"
     s .= "=== Lifetime ===`r`n"
-    s .= "Sessions launched: " . LifetimeSessions . "`r`n"
-    s .= "Total reconnects:  " . LifetimeReconnects . "`r`n"
-    s .= "Crashes detected:  " . LifetimeCrashes . "`r`n"
-    s .= "Avg reconnects/run:" . avgPerSession . "`r`n"
+    s .= "Sessions launched:  " . LifetimeSessions . "`r`n"
+    s .= "Total reconnects:   " . LifetimeReconnects . "`r`n"
+    s .= "Crashes detected:   " . LifetimeCrashes . "`r`n"
+    s .= "Avg reconnects/run: " . avgPerSession . "`r`n"
     s .= "`r`n"
     s .= "=== Active Profile ===`r`n"
     p := GetActiveProfile()
     if (p) {
         s .= "Name:   " . p["name"] . "`r`n"
         s .= "Type:   " . p["type"] . "`r`n"
-        s .= "Target: " . GetProfileTarget(p) . "`r`n"
+        s .= "Target: " . MaskVipForView(GetProfileTarget(p)) . "`r`n"
+        if (p.Has("fav") && p["fav"])
+            s .= "★ Favorite`r`n"
     } else {
         s .= "(none)`r`n"
     }
@@ -1705,7 +1989,8 @@ ShowAbout() {
         "A GUI tool for keeping your Roblox session alive -`n" .
         "auto-reconnect, anti-AFK, scheduling, Discord alerts,`n" .
         "multi-profile servers, and much more.`n`n" .
-        "Developed by: " . APP_AUTHOR . "`n" .
+        "Repo: github.com/" . APP_REPO . "`n" .
+        "Author: " . APP_AUTHOR . "`n" .
         "Data folder: " . DATA_DIR,
         "About " . APP_NAME, 64)
 }
@@ -1718,6 +2003,7 @@ ShowMainWindow() {
 GuiClose(*) {
     global Cfg
     PullCfgFromGui()
+    SaveWindowGeometry()
     SaveConfig()
     SaveStats()
     if (Cfg["MinimizeToTray"]) {
@@ -1725,6 +2011,21 @@ GuiClose(*) {
         return true  ; prevent default close
     }
     ExitApp()
+}
+
+SaveWindowGeometry() {
+    global Cfg
+    if (!Cfg.Has("RememberWindowPos") || !Cfg["RememberWindowPos"])
+        return
+    try {
+        WinGetPos(&x, &y, &w, &h, "ahk_id " . myGui.Hwnd)
+        Cfg["WindowX"] := x
+        Cfg["WindowY"] := y
+        Cfg["WindowW"] := w
+        Cfg["WindowH"] := h
+    } catch Error as e {
+        ;
+    }
 }
 
 GuiSize(guiObj, minMax, width, height) {
@@ -1740,3 +2041,424 @@ GuiSize(guiObj, minMax, width, height) {
 ; ============================================================================
 
 SetTimer(() => (IsMonitoringActive ? RefreshStats() : 0), 5000)
+
+; ============================================================================
+; =====================  V3.1 helper functions  ==============================
+; ============================================================================
+
+; ---------- Hotkeys ----------
+
+RegisterHotkeys() {
+    global Cfg
+    static last := Map()
+    bindings := Map(
+        "Hotkey_ToggleMonitor", (*) => ToggleMonitoring(),
+        "Hotkey_Reconnect",     (*) => ManualReconnect(),
+        "Hotkey_Minimize",      (*) => MinimizeRobloxWindows(),
+        "Hotkey_AntiAfk",       (*) => ToggleAntiAfk(!IsAntiAfkActive),
+        "Hotkey_Emergency",     (*) => EmergencyReconnect(),
+        "Hotkey_Panic",         (*) => PanicStop()
+    )
+    ; Disable previous bindings
+    for key, prev in last {
+        if (prev != "") {
+            try HotKey(prev, "Off")
+        }
+    }
+    last := Map()
+    for key, callback in bindings {
+        binding := Cfg.Has(key) ? Cfg[key] : ""
+        if (binding = "")
+            continue
+        try {
+            HotKey(binding, callback)
+            HotKey(binding, "On")
+            last[key] := binding
+        } catch Error as e {
+            Log("Failed to bind hotkey " . binding . " (" . key . "): " . e.Message, "Warn")
+        }
+    }
+}
+
+RefreshHotkeysSummary() {
+    global Cfg
+    try {
+        s := "F1=" . Cfg["Hotkey_ToggleMonitor"]
+            . "  F2=" . Cfg["Hotkey_Reconnect"]
+            . "  Min=" . Cfg["Hotkey_Minimize"]
+            . "  AFK=" . Cfg["Hotkey_AntiAfk"]
+            . "  Emerg=" . Cfg["Hotkey_Emergency"]
+            . "  Panic=" . Cfg["Hotkey_Panic"]
+        HotkeysSummary.Text := s
+    } catch Error as e {
+        ;
+    }
+}
+
+HotkeyRebindDialog() {
+    global Cfg
+    dlg := Gui("+Owner" . myGui.Hwnd . " +ToolWindow", "Rebind Hotkeys")
+    dlg.SetFont("s9", "Segoe UI")
+    dlg.MarginX := 10
+    dlg.MarginY := 10
+    labels := Map(
+        "Hotkey_ToggleMonitor", "Toggle monitoring:",
+        "Hotkey_Reconnect",     "Manual reconnect:",
+        "Hotkey_Minimize",      "Minimize Roblox:",
+        "Hotkey_AntiAfk",       "Toggle Anti-AFK:",
+        "Hotkey_Emergency",     "Emergency reconnect:",
+        "Hotkey_Panic",         "Panic stop:"
+    )
+    edits := Map()
+    y := 10
+    for key, label in labels {
+        dlg.Add("Text", "x10 y" . (y + 3) . " w160", label)
+        e := dlg.Add("Hotkey", "x180 y" . y . " w180 h22", Cfg[key])
+        edits[key] := e
+        y += 30
+    }
+    okB := dlg.Add("Button", "x180 y" . (y + 10) . " w80 h26 Default", "OK")
+    cancelB := dlg.Add("Button", "x270 y" . (y + 10) . " w80 h26", "Cancel")
+    okB.OnEvent("Click", okClick)
+    cancelB.OnEvent("Click", cancelClick)
+    dlg.OnEvent("Close", cancelClick)
+    dlg.Show("w380 h" . (y + 50))
+    WinWaitClose("ahk_id " . dlg.Hwnd)
+    return
+
+    okClick(*) {
+        for key, e in edits {
+            v := e.Value
+            if (v != "")
+                Cfg[key] := v
+        }
+        SaveConfig()
+        RegisterHotkeys()
+        RefreshHotkeysSummary()
+        dlg.Destroy()
+    }
+    cancelClick(*) {
+        dlg.Destroy()
+    }
+}
+
+; ---------- Window position / show options ----------
+
+BuildShowOptions() {
+    global Cfg
+    w := Cfg.Has("WindowW") && Cfg["WindowW"] >= 400 ? Cfg["WindowW"] : 580
+    h := Cfg.Has("WindowH") && Cfg["WindowH"] >= 300 ? Cfg["WindowH"] : 580
+    opts := "w" . w . " h" . h
+    if (Cfg.Has("RememberWindowPos") && Cfg["RememberWindowPos"]
+        && Cfg.Has("WindowX") && Cfg["WindowX"] >= 0
+        && Cfg.Has("WindowY") && Cfg["WindowY"] >= 0) {
+        opts .= " x" . Cfg["WindowX"] . " y" . Cfg["WindowY"]
+    }
+    return opts
+}
+
+; ---------- Tooltips ----------
+
+InstallTooltips() {
+    ; AHK v2 tooltip-on-hover via OnMessage; light implementation:
+    ; We just set window-level tooltips for selected controls using ToolTip on hover via OnEvent("MouseMove")
+    ; Simpler approach: rely on the documented "ToolTip" option for built-in controls (slider).
+    ; For other controls, attach via SetCapture is heavy; instead we inject tray-tip documentation.
+    ; (Full-coverage tooltips reserved for V3.2.)
+    try {
+        ; Best-effort: store hints in StatusBar on focus.
+        ProfileFilterEdit.OnEvent("Focus", (*) => StatusBar.SetText("Filter profiles by name, type, notes, link, or game ID"))
+        StopAfterReconEdit.OnEvent("Focus", (*) => StatusBar.SetText("Hard cap: 0 = unlimited. Stops monitoring once cap is reached."))
+        SoundVolSlider.OnEvent("Focus", (*) => StatusBar.SetText("Sound volume 0-100. Affects system master volume during playback."))
+        RebindHotkeysBtn.OnEvent("Focus", (*) => StatusBar.SetText("Customize the global hotkeys used by " . APP_NAME))
+        SelfTestBtn.OnEvent("Focus", (*) => StatusBar.SetText("Run quick checks: data dir, internet, Roblox install, Discord webhook"))
+        RobloxStatusBtn.OnEvent("Focus", (*) => StatusBar.SetText("Ping Roblox status API to detect platform-wide outages"))
+        CheckUpdatesBtn.OnEvent("Focus", (*) => StatusBar.SetText("Check the GitHub releases API for a newer version"))
+    } catch Error as e {
+        ;
+    }
+}
+
+; ---------- Battery / power ----------
+
+ApplyBatteryWatcher() {
+    global Cfg, BatteryCheckTimer
+    if (BatteryCheckTimer) {
+        try SetTimer(BatteryCheckTimer, 0)
+        BatteryCheckTimer := ""
+    }
+    if (!Cfg["PauseOnBattery"])
+        return
+    BatteryCheckTimer := () => BatteryCheckTick()
+    SetTimer(BatteryCheckTimer, 30000)
+}
+
+BatteryCheckTick() {
+    global Cfg, IsMonitoringActive
+    if (!Cfg["PauseOnBattery"])
+        return
+    if (IsOnBattery() && IsMonitoringActive) {
+        Log("On battery power - pausing monitoring", "Warn")
+        StopMonitoring()
+        Notify("error", APP_NAME, "Paused: system on battery power")
+    }
+}
+
+IsOnBattery() {
+    ; SYSTEM_POWER_STATUS struct: ACLineStatus byte: 0=offline (battery), 1=online, 255=unknown
+    sps := Buffer(12, 0)
+    try {
+        if (!DllCall("kernel32\GetSystemPowerStatus", "Ptr", sps.Ptr))
+            return false
+        ac := NumGet(sps, 0, "UChar")
+        return ac = 0
+    } catch Error as e {
+        return false
+    }
+}
+
+; ---------- Profile import/export (JSON) ----------
+
+ExportProfilesJson() {
+    global Profiles
+    dest := FileSelect("S", , "Export profiles", "JSON (*.json)")
+    if (!dest)
+        return
+    if (!RegExMatch(dest, "i)\.json$"))
+        dest .= ".json"
+    try {
+        json := "[`n"
+        for i, p in Profiles {
+            json .= "  {"
+                . '"name":"' . EscapeJson(p["name"]) . '",'
+                . '"type":"' . EscapeJson(p["type"]) . '",'
+                . '"link":"' . EscapeJson(p["link"]) . '",'
+                . '"gameId":"' . EscapeJson(p["gameId"]) . '",'
+                . '"notes":"' . EscapeJson(p["notes"]) . '",'
+                . '"fav":' . ((p.Has("fav") && p["fav"]) ? "true" : "false")
+                . "}"
+            if (i < Profiles.Length)
+                json .= ","
+            json .= "`n"
+        }
+        json .= "]`n"
+        if (FileExist(dest))
+            FileDelete(dest)
+        FileAppend(json, dest)
+        MsgBox("Exported " . Profiles.Length . " profile(s) to:`n" . dest, APP_NAME, 64)
+    } catch Error as e {
+        MsgBox("Export failed: " . e.Message, APP_NAME, 16)
+    }
+}
+
+ImportProfilesJson() {
+    global Profiles
+    src := FileSelect(1, , "Import profiles", "JSON (*.json)")
+    if (!src)
+        return
+    try {
+        content := FileRead(src)
+    } catch Error as e {
+        MsgBox("Read failed: " . e.Message, APP_NAME, 16)
+        return
+    }
+    imported := ParseProfilesJson(content)
+    if (imported.Length = 0) {
+        MsgBox("No profiles found in file (or unsupported format).", APP_NAME, 48)
+        return
+    }
+    choice := MsgBox(imported.Length . " profile(s) found.`n`nYes = Replace all`nNo = Append`nCancel = Abort",
+        APP_NAME, 3 + 32)
+    if (choice = "Cancel")
+        return
+    if (choice = "Yes")
+        Profiles := []
+    for p in imported
+        Profiles.Push(p)
+    SaveProfiles()
+    RefreshProfilesLV()
+    RefreshProfileDropDown()
+    Log("Imported " . imported.Length . " profile(s) from JSON", "Info")
+}
+
+ParseProfilesJson(text) {
+    ; Minimal JSON parser tailored to our exported structure.
+    ; Tolerant of whitespace; expects an array of objects with the documented fields.
+    out := []
+    pos := 1
+    Loop {
+        ; Find next '{'
+        objStart := InStr(text, "{", false, pos)
+        if (!objStart)
+            break
+        objEnd := InStr(text, "}", false, objStart)
+        if (!objEnd)
+            break
+        chunk := SubStr(text, objStart, objEnd - objStart + 1)
+        p := Map(
+            "name",   ReadJsonStr(chunk, "name"),
+            "type",   ReadJsonStr(chunk, "type"),
+            "link",   ReadJsonStr(chunk, "link"),
+            "gameId", ReadJsonStr(chunk, "gameId"),
+            "notes",  ReadJsonStr(chunk, "notes"),
+            "fav",    ReadJsonBool(chunk, "fav")
+        )
+        if (p["name"] = "")
+            p["name"] := "Imported"
+        if (p["type"] != "private" && p["type"] != "public")
+            p["type"] := "private"
+        out.Push(p)
+        pos := objEnd + 1
+    }
+    return out
+}
+
+ReadJsonStr(chunk, key) {
+    pat := '"' . key . '"\s*:\s*"((?:[^"\\]|\\.)*)"'
+    if (RegExMatch(chunk, pat, &m))
+        return UnescapeJson(m[1])
+    return ""
+}
+
+ReadJsonBool(chunk, key) {
+    pat := '"' . key . '"\s*:\s*(true|false)'
+    if (RegExMatch(chunk, pat, &m))
+        return m[1] = "true"
+    return false
+}
+
+UnescapeJson(s) {
+    s := StrReplace(s, "\n", "`n")
+    s := StrReplace(s, "\r", "`r")
+    s := StrReplace(s, "\t", "`t")
+    s := StrReplace(s, '\"', '"')
+    s := StrReplace(s, "\\", "\")
+    return s
+}
+
+; ---------- Stats CSV export ----------
+
+ExportStatsCsv() {
+    global LifetimeReconnects, LifetimeCrashes, LifetimeSessions
+    global SuccessfulReconnects, FailedReconnects, ReconnectAttempts, SessionStart
+    dest := FileSelect("S", , "Export stats", "CSV (*.csv)")
+    if (!dest)
+        return
+    if (!RegExMatch(dest, "i)\.csv$"))
+        dest .= ".csv"
+    uptimeMs := A_TickCount - SessionStart
+    totalAttempts := SuccessfulReconnects + FailedReconnects
+    successRate := totalAttempts > 0 ? Round(100.0 * SuccessfulReconnects / totalAttempts, 1) : 0
+    csv := "metric,value`r`n"
+    csv .= "session_uptime," . FormatDuration(uptimeMs) . "`r`n"
+    csv .= "session_attempts," . ReconnectAttempts . "`r`n"
+    csv .= "session_successful," . SuccessfulReconnects . "`r`n"
+    csv .= "session_failed," . FailedReconnects . "`r`n"
+    csv .= "session_success_rate_pct," . successRate . "`r`n"
+    csv .= "lifetime_sessions," . LifetimeSessions . "`r`n"
+    csv .= "lifetime_reconnects," . LifetimeReconnects . "`r`n"
+    csv .= "lifetime_crashes," . LifetimeCrashes . "`r`n"
+    try {
+        if (FileExist(dest))
+            FileDelete(dest)
+        FileAppend(csv, dest)
+        MsgBox("Stats exported to:`n" . dest, APP_NAME, 64)
+    } catch Error as e {
+        MsgBox("Export failed: " . e.Message, APP_NAME, 16)
+    }
+}
+
+; ---------- Roblox status / self-test / update check ----------
+
+CheckRobloxStatus(verbose) {
+    try {
+        http := ComObject("WinHttp.WinHttpRequest.5.1")
+        http.SetTimeouts(4000, 4000, 4000, 4000)
+        http.Open("GET", "https://status.roblox.com/api/v2/status.json", false)
+        http.Send()
+        body := http.ResponseText
+        ; Look for "indicator":"none" / "minor" / "major"
+        indicator := "unknown"
+        if (RegExMatch(body, '"indicator"\s*:\s*"([^"]+)"', &m))
+            indicator := m[1]
+        desc := ""
+        if (RegExMatch(body, '"description"\s*:\s*"([^"]+)"', &md))
+            desc := md[1]
+        msg := "Roblox status: " . indicator . (desc != "" ? "`n" . desc : "")
+        Log("Roblox status: " . indicator . " (" . desc . ")", "Info")
+        if (verbose)
+            MsgBox(msg, APP_NAME, indicator = "none" ? 64 : 48)
+        return indicator
+    } catch Error as e {
+        Log("Roblox status check failed: " . e.Message, "Warn")
+        if (verbose)
+            MsgBox("Could not reach Roblox status API.`n" . e.Message, APP_NAME, 48)
+        return "unreachable"
+    }
+}
+
+RunSelfTest() {
+    out := "Self-test results:`n`n"
+    out .= "• Data folder: " . (DirExist(DATA_DIR) ? "OK (" . DATA_DIR . ")" : "MISSING") . "`n"
+    out .= "• Config file: " . (FileExist(CONFIG_FILE) ? "OK" : "not yet created") . "`n"
+    out .= "• Profiles file: " . (FileExist(PROFILES_FILE) ? "OK (" . Profiles.Length . " profile(s))" : "not yet created") . "`n"
+    out .= "• Internet: " . (CheckInternet() ? "OK" : "FAIL") . "`n"
+    out .= "• Roblox installed: " . (FileExist(A_AppData . "\..\Local\Roblox\Versions") || FileExist("C:\Program Files (x86)\Roblox") ? "likely" : "not detected") . "`n"
+    out .= "• Roblox running: " . (ProcessExist("RobloxPlayerBeta.exe") ? "yes" : "no") . "`n"
+    out .= "• Roblox status API: " . CheckRobloxStatus(false) . "`n"
+    out .= "• Discord webhook: " . (Cfg["DiscordEnabled"] && Cfg["DiscordWebhook"] != "" ? "configured" : "not configured") . "`n"
+    out .= "• Active profile: " . (GetActiveProfile() ? GetActiveProfile()["name"] : "(none)") . "`n"
+    out .= "• Anti-AFK enabled: " . (Cfg["AntiAfkEnabled"] ? "yes" : "no") . "`n"
+    out .= "• On battery: " . (IsOnBattery() ? "yes" : "no") . "`n"
+    MsgBox(out, APP_NAME . " - Self-test", 64)
+}
+
+CheckForUpdates(verbose) {
+    global APP_VERSION, APP_REPO
+    url := "https://api.github.com/repos/" . APP_REPO . "/releases/latest"
+    try {
+        http := ComObject("WinHttp.WinHttpRequest.5.1")
+        http.SetTimeouts(4000, 4000, 4000, 4000)
+        http.Open("GET", url, false)
+        http.SetRequestHeader("User-Agent", "RobloxReconnect-Updater")
+        http.SetRequestHeader("Accept", "application/vnd.github+json")
+        http.Send()
+        body := http.ResponseText
+        latest := ""
+        if (RegExMatch(body, '"tag_name"\s*:\s*"v?([^"]+)"', &m))
+            latest := m[1]
+        if (latest = "") {
+            if (verbose)
+                MsgBox("Could not parse latest release.", APP_NAME, 48)
+            return
+        }
+        if (CompareVersions(latest, APP_VERSION) > 0) {
+            Log("Update available: v" . latest . " (current v" . APP_VERSION . ")", "Info")
+            res := MsgBox("A new version is available!`n`nLatest: v" . latest . "`nCurrent: v" . APP_VERSION
+                . "`n`nOpen releases page?", APP_NAME, 4 + 32)
+            if (res = "Yes")
+                Run("https://github.com/" . APP_REPO . "/releases/latest")
+        } else if (verbose) {
+            MsgBox("You're up to date (v" . APP_VERSION . ").", APP_NAME, 64)
+        }
+    } catch Error as e {
+        Log("Update check failed: " . e.Message, "Warn")
+        if (verbose)
+            MsgBox("Update check failed:`n" . e.Message, APP_NAME, 48)
+    }
+}
+
+CompareVersions(a, b) {
+    aP := StrSplit(a, ".")
+    bP := StrSplit(b, ".")
+    n := Max(aP.Length, bP.Length)
+    Loop n {
+        ai := aP.Length >= A_Index ? Integer(aP[A_Index]) : 0
+        bi := bP.Length >= A_Index ? Integer(bP[A_Index]) : 0
+        if (ai > bi)
+            return 1
+        if (ai < bi)
+            return -1
+    }
+    return 0
+}
