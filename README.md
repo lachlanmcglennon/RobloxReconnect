@@ -8,14 +8,21 @@
 
 **Automated Roblox connection management with a full tabbed GUI**
 
-> 🚀 **V3.1 is here!** Built on top of V3.0's tabbed UI, V3.1 ships an audit
-> bug-fix pass plus 20 high-value roadmap features:
+> 🛡 **V3.2 — smart disconnect detection.** Catches the "Disconnected"
+> overlay even when Roblox keeps the process alive: tails the Roblox log
+> file in `%LOCALAPPDATA%\Roblox\logs`, detects hung/frozen client
+> windows via `IsHungAppWindow`, and closes only the affected PID for
+> multi-instance setups. Configurable from the new **Disconnect
+> Detection** group on the Monitor tab.
+>
+> 🚀 **V3.1 baseline:** Built on top of V3.0's tabbed UI, V3.1 ships an
+> audit bug-fix pass plus 20 high-value roadmap features:
 > profile rotation, JSON import/export, favorites & filter, rebindable hotkeys,
 > pause-on-battery, success-rate %, CSV stats export, config backups,
 > Roblox status check, self-test, auto-update check and more.
-> See [FEATURES.md](./FEATURES.md) for the full 200-feature roadmap.
+> See [FEATURES.md](./FEATURES.md) for the full 210-feature roadmap.
 >
-> **Script:** `RobloxReconnectV3.1.Ahk` (V2 / V3.0 kept for legacy reference)
+> **Script:** `RobloxReconnectV3.2.Ahk` (V2 / V3.0 / V3.1 kept for legacy reference)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![AutoHotkey v2](https://img.shields.io/badge/AutoHotkey-v2.0-blue.svg)](https://www.autohotkey.com/)
@@ -29,6 +36,9 @@
 
 ### 🔄 Reliable auto-reconnect
 - Detects Roblox process exit, error dialogs and disconnect window-titles
+- **New in V3.2:** tails Roblox log file for in-game disconnect overlays where the process stays alive (FLog patterns: `Disconnect with reason`, `Disconnected from server`, `ReplicationTimeout`, error codes 17/260/264/268/277/279/522/772, etc.)
+- **New in V3.2:** frozen/hung window detection via Win32 `IsHungAppWindow` with a configurable grace period and post-launch suppression to avoid false-killing during shader compile
+- **New in V3.2:** per-PID close — only kills the disconnected Roblox instance instead of every `RobloxPlayerBeta.exe`
 - Configurable check interval, max attempts cap, cooldown, exponential backoff and jitter
 - Pre-checks internet connectivity (skips when offline)
 - Optional Roblox status API ping before reconnecting
@@ -85,7 +95,7 @@ git clone https://github.com/lachlanmcglennon/RobloxReconnect.git
 cd RobloxReconnect
 ```
 
-Then double-click `RobloxReconnectV3.1.Ahk` (AHK v2 must be the default `.ahk`
+Then double-click `RobloxReconnectV3.2.Ahk` (AHK v2 must be the default `.ahk`
 handler) or right-click → **Run with AutoHotkey**.
 
 On first launch the script creates a `RobloxReconnect-Data\` folder next to the
@@ -104,11 +114,13 @@ RobloxReconnect-Data\
 
 ## 🎯 Quick start
 
-1. Launch the script — the GUI opens on the **Servers** tab.
-2. Click **Add** to create a profile (VIP link **or** public game ID), give it a
-   name, optionally mark it ★ favorite.
+1. Launch the script — the GUI opens on the **Monitor** tab.
+2. Switch to the **Servers** tab and click **Add** to create a profile
+   (VIP link **or** public game ID), give it a name, optionally mark it ★ favorite.
 3. Select the profile and click **Set Active**.
-4. Switch to the **General** tab and click **Start Monitoring**, or press `F1`.
+4. Switch back to the **Monitor** tab and click **Start Monitoring**, or press `F1`.
+5. (Optional, V3.2) Review the **Disconnect Detection** group at the bottom of
+   the Monitor tab and tune log-tail / hung-window detection to your preference.
 
 The script will now watch for disconnects and auto-reconnect using your active
 profile (or rotate through your profiles if **Rotate profiles** is enabled).
@@ -121,7 +133,7 @@ profile (or rotate through your profiles if **Rotate profiles** is enabled).
 |-------------------|------------------------------------------|
 | `F1`              | Toggle monitoring on / off               |
 | `F2`              | Manual reconnect now                     |
-| `F3`              | Show / hide the GUI                      |
+| `F3`              | Minimize Roblox window                   |
 | `F4`              | Toggle Anti-AFK                          |
 | `Ctrl+Shift+R`    | Emergency reconnect                      |
 | `Ctrl+Shift+Q`    | Panic stop (kills timers + Anti-AFK)     |
@@ -132,16 +144,19 @@ All six are rebindable from **Settings → Hotkeys → Rebind…**.
 
 ## 🧭 GUI tour
 
+The GUI has nine tabs in this order:
+
 | Tab          | Contents                                                                       |
 |--------------|--------------------------------------------------------------------------------|
-| General      | Start / stop, reconnect now, current status, last reconnect time              |
+| Monitor      | Start / stop, reconnect now, current status, check-interval / cooldown / backoff, **Disconnect Detection (V3.2)** group |
 | Servers      | Profile list, add / edit / delete, filter, ★ favorite, import / export, rotate |
-| Anti-AFK     | Enable, key, interval, jitter, pause-during-reconnect                          |
-| Schedule     | Scheduled rejoin, stop-at time, quiet hours, stop-after-N, pause-on-battery   |
-| Alerts       | Sound on connect/disconnect, volume, tray balloon, Discord webhook             |
-| Stats        | Lifetime + session counters, success rate, CSV export                          |
-| Logs         | Live log view, level filter, search, export, clear                             |
-| Settings     | Window persistence, hotkey rebind, diagnostics (self-test, status, update)    |
+| Window       | Minimize-after-join, always-on-top, force-kill, process priority, browser-close after join |
+| Anti-AFK     | Enable, mouse vs key method, key, interval, jitter, focus gating, pause-during-reconnect |
+| Alerts       | Sound on connect/disconnect, volume, tray balloon, per-event toggles, Discord webhook |
+| Schedule     | Scheduled rejoin every N hours, stop-at HH:MM, delayed start, stop-after-N, pause-on-battery |
+| Stats        | Lifetime + session counters, success rate, CSV export, reset                  |
+| Logs         | Live log view, level filter, search, export, clear, copy                      |
+| Settings     | Sleep prevention, window persistence, hotkey rebind, log privacy, diagnostics (self-test, status, update) |
 
 ---
 
@@ -172,6 +187,34 @@ PRs welcome — please:
 ---
 
 ## 📝 Changelog
+
+### v3.2.0
+*Tag: `v3.2.0` — first GitHub-tagged release.*
+- ✨ **Smart disconnect detection** (Monitor tab → Disconnect Detection group):
+  - Roblox log-file tailing for in-game "Disconnected" overlays where the
+    process stays alive (configurable poll interval, default 3 s)
+  - `IsHungAppWindow`-based frozen-client detection with a configurable
+    grace period (default 15 s) and post-launch suppression to prevent
+    kill-loops during shader compile / first-place load
+  - Per-PID close of only the offending Roblox instance (multi-instance safe)
+- 🐛 **CRITICAL:** `LoadConfig` now uses an explicit boolean-key allowlist;
+  previously any integer config default of 0 or 1 (e.g. `MaxAttempts`,
+  `StopAfterReconnects`, `ActiveProfile`, `DelayedStartSec`, `RejoinMinutes`)
+  was misclassified as a boolean on reload and silently clobbered to 0/1
+- 🐛 `PullCfgFromGui` no longer throws `TypeError` when a "Number" Edit
+  field is cleared; falls back to the previous valid value via `SafeInt`
+- 🐛 `ReconnectAttempts` is now reset on a successful reconnect so
+  exponential backoff and `MaxAttempts` apply per-incident, not lifetime
+- 🐛 Removed false-positive log patterns (`DataModel::close`,
+  `NetworkClient::Disconnect`) that fired on legitimate teleports and
+  "Leave Game" actions
+- 🐛 Re-entrancy guard prevents `LogTailTick`/`MonitorTick` from
+  triggering a second reconnect while one is already in progress
+- 🔒 Discord webhook URLs, VIP `?privateServerLinkCode=…` tokens, and
+  `roblox://` placeId/accessCode parameters are now redacted in `app.log`
+- 🛠 **New INI keys** (auto-populated on first run; all also exposed in the
+  Monitor tab): `DetectViaLog` (bool, true), `DetectViaHang` (bool, true),
+  `HangGraceSec` (int, 15), `LogTailIntervalSec` (int, 3)
 
 ### v3.1.0
 - 🐛 Fixed `ProcessSetPriority` mapping (now uses letter codes)

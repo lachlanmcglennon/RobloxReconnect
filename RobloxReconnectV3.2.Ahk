@@ -1,6 +1,18 @@
 ; ============================================================================
-; Roblox Auto-Reconnect Tool V3.1
+; Roblox Auto-Reconnect Tool V3.2
 ; AutoHotkey v2 - Comprehensive GUI for Roblox session management
+;
+; V3.2 additions vs V3.1:
+;   * Roblox log-file tailing (%LOCALAPPDATA%\Roblox\logs) - detects in-game
+;     "Disconnected" overlay where the process is still alive (FLog::Network,
+;     ClientDisconnect, DataModel::close, "Disconnect with reason", etc.)
+;   * Frozen-window detection via Win32 IsHungAppWindow with configurable
+;     grace period - catches hung clients that don't crash
+;   * Per-PID close: when a specific Roblox instance is identified as
+;     disconnected (e.g. via its HWND), close only that PID instead of all
+;     RobloxPlayerBeta.exe processes (multi-instance friendly)
+;   * New config flags: DetectViaLog, DetectViaHang, HangGraceSec,
+;     LogTailIntervalSec
 ;
 ; V3.1 additions vs V3.0:
 ;   * Profile rotation on each reconnect, favorite flag, search/filter
@@ -22,9 +34,9 @@ Persistent()
 SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
-global APP_NAME       := "Roblox Auto-Reconnect V3.1"
-global APP_VERSION    := "3.1.0"
-global APP_AUTHOR     := "INNIE (V3.1 Audit + Feature Pack)"
+global APP_NAME       := "Roblox Auto-Reconnect V3.2"
+global APP_VERSION    := "3.2.0"
+global APP_AUTHOR     := "INNIE (V3.2 Resilience Pack)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
 global CONFIG_FILE    := DATA_DIR . "\config.ini"
@@ -50,6 +62,15 @@ global LifetimeSessions   := 0
 global SuccessfulReconnects := 0      ; this session (for success rate)
 global FailedReconnects     := 0
 global CheckTimer         := ""
+global LogTailTimer       := ""
+global LogTailFile        := ""    ; full path of currently-tailed Roblox log
+global LogTailPos         := 0     ; byte offset already consumed
+global HangFirstSeenAt    := 0     ; A_TickCount when first hang was observed (0 = none)
+global LastLaunchTickCount:= 0     ; A_TickCount of last Run(target); used for post-launch hang grace
+global LastLaunchPid      := 0     ; PID of the most recent Run(target); used by ReconnectToGame success check
+global LastReconnectReason:= ""    ; user-facing reason string of the most recent TriggerReconnect
+global DeferredReconnectTimer := ""  ; tracks SetTimer handle of any deferred (InternetCheck) reconnect, so Stop/Panic can cancel
+global ReconnectInProgress:= false ; true while ReconnectToGame is running; gates detectors
 global RejoinTimer        := ""
 global AntiAfkTimer       := ""
 global StopAtTimer        := ""
@@ -120,7 +141,12 @@ global Cfg := Map(
     "Hotkey_AntiAfk",      "F4",
     "Hotkey_Emergency",    "^+r",
     "Hotkey_Panic",        "^+q",
-    "AutoUpdateCheck",     true
+    "AutoUpdateCheck",     true,
+    ; --- V3.2 additions ---
+    "DetectViaLog",        true,   ; tail %LOCALAPPDATA%\Roblox\logs for disconnect patterns
+    "DetectViaHang",       true,   ; IsHungAppWindow check on Roblox windows
+    "HangGraceSec",        15,     ; window must be hung for this many seconds before triggering
+    "LogTailIntervalSec",  3       ; how often to read incremental log bytes
 )
 
 ; ====== Bootstrap ======
@@ -174,7 +200,7 @@ JitterEdit := myGui.Add("Edit", "x480 y157 w45 h22 Number", Cfg["JitterSec"])
 InternetCheckBox := myGui.Add("Checkbox", "x40 y190 w200 vInternet", "Verify internet before reconnect")
 InternetCheckBox.Value := Cfg["InternetCheck"] ? 1 : 0
 
-myGui.Add("GroupBox", "x20 y260 w520 h120", "Controls")
+myGui.Add("GroupBox", "x20 y260 w520 h95", "Controls")
 StartBtn := myGui.Add("Button", "x40 y285 w120 h36", "▶ Start Monitoring")
 StartBtn.OnEvent("Click", (*) => StartMonitoring())
 StopBtn := myGui.Add("Button", "x170 y285 w120 h36", "■ Stop")
@@ -184,8 +210,32 @@ ReconnectBtn.OnEvent("Click", (*) => ManualReconnect())
 PanicBtn := myGui.Add("Button", "x430 y285 w100 h36", "✋ Panic Stop")
 PanicBtn.OnEvent("Click", (*) => PanicStop())
 
-myGui.Add("Text", "x40 y335 w500 cGray",
+myGui.Add("Text", "x40 y330 w500 cGray",
     "Hotkeys: F1 toggle monitor  •  F2 reconnect  •  F3 minimize  •  F4 anti-AFK  •  Ctrl+Shift+R emergency  •  Ctrl+Shift+Q panic")
+
+myGui.Add("GroupBox", "x20 y365 w520 h130", "Disconnect Detection (V3.2)")
+DetectViaLogCheck := myGui.Add("Checkbox", "x40 y390 w470 vDetectViaLog",
+    "Tail Roblox log file (detects in-game 'Disconnected' overlay while process is still running)")
+DetectViaLogCheck.Value := Cfg["DetectViaLog"] ? 1 : 0
+DetectViaLogCheck.OnEvent("Click", (*) => OnDetectionToggle())
+DetectViaLogCheck.OnEvent("Focus", (*) => StatusBar.SetText("V3.2: Detects in-game 'Disconnected' overlay by tailing Roblox's log file"))
+
+DetectViaHangCheck := myGui.Add("Checkbox", "x40 y413 w470 vDetectViaHang",
+    "Detect frozen/hung Roblox windows (Win32 IsHungAppWindow)")
+DetectViaHangCheck.Value := Cfg["DetectViaHang"] ? 1 : 0
+DetectViaHangCheck.OnEvent("Click", (*) => OnDetectionToggle())
+DetectViaHangCheck.OnEvent("Focus", (*) => StatusBar.SetText("V3.2: Detects frozen Roblox windows via IsHungAppWindow (uses Hang grace below)"))
+
+myGui.Add("Text", "x40 y443 w110", "Hang grace (sec):")
+HangGraceEdit := myGui.Add("Edit", "x155 y440 w50 h22 Number", Cfg["HangGraceSec"])
+HangGraceEdit.OnEvent("Focus", (*) => StatusBar.SetText("Seconds the Roblox window must stay frozen before triggering a reconnect (default 15)"))
+myGui.Add("Text", "x215 y443 w140", "Log poll interval (sec):")
+LogTailIntervalEdit := myGui.Add("Edit", "x355 y440 w40 h22 Number", Cfg["LogTailIntervalSec"])
+LogTailIntervalEdit.OnEvent("Focus", (*) => StatusBar.SetText("How often to re-read the Roblox log file (default 3s; higher = less CPU, slower detection)"))
+myGui.Add("Text", "x405 y443 w130 cGray", "(higher = less CPU)")
+
+myGui.Add("Text", "x40 y467 w490 cGray",
+    "Tip: increase grace if Roblox is killed during long loading screens. Disable log tail if you teleport between places often.")
 
 ; ---------- Servers Tab ----------
 Tab.UseTab(2)
@@ -525,8 +575,27 @@ EnsureDataDir() {
     }
 }
 
+; Explicit set of boolean Cfg keys. CRITICAL: must not be inferred from
+; default values because in AHK v2 true/false are integers 1/0, so e.g.
+; MaxAttempts:0 would be misread as a bool and silently coerced to 0/1
+; on every save/load cycle (breaking MaxAttempts, StopAfterReconnects,
+; ActiveProfile, DelayedStartSec, RejoinMinutes).
+global BOOL_KEYS := Map(
+    "AutoRejoinEnabled", 1, "BackoffEnabled", 1, "InternetCheck", 1,
+    "MinimizeAfterJoin", 1, "AlwaysOnTopRoblox", 1, "CloseBrowsers", 1,
+    "AntiAfkEnabled", 1, "AntiAfkOnlyFocused", 1, "AntiAfkPauseDuringReconnect", 1,
+    "SoundEnabled", 1, "DiscordEnabled", 1, "NotifyOnConnect", 1,
+    "NotifyOnDisconnect", 1, "NotifyOnError", 1, "TrayNotifications", 1,
+    "MinimizeToTray", 1, "StartMinimized", 1, "AlwaysOnTopGui", 1,
+    "AutoStartWithWindows", 1, "PreventSleep", 1, "LogToFile", 1,
+    "StartMonitoringOnLaunch", 1, "RotateProfiles", 1, "PauseOnBattery", 1,
+    "MaskVipLinks", 1, "HideLinksInLogs", 1, "BackupConfigOnSave", 1,
+    "RememberWindowPos", 1, "AutoUpdateCheck", 1,
+    "DetectViaLog", 1, "DetectViaHang", 1
+)
+
 LoadConfig() {
-    global Cfg, CONFIG_FILE, ActiveProfileIdx
+    global Cfg, CONFIG_FILE, ActiveProfileIdx, BOOL_KEYS
     if (!FileExist(CONFIG_FILE))
         return
     for key, defaultVal in Cfg.Clone() {
@@ -534,17 +603,18 @@ LoadConfig() {
             val := IniRead(CONFIG_FILE, "Config", key, "__MISSING__")
             if (val = "__MISSING__")
                 continue
-            ; bool BEFORE int (false/true are also Integers in v2)
-            if (defaultVal == true || defaultVal == false)
+            if (BOOL_KEYS.Has(key)) {
                 Cfg[key] := (val = "1" || val = "true" || val = "True")
-            else if (defaultVal is Integer)
+            } else if (defaultVal is Integer) {
+                ; Integer comes before Float because true/false ARE Integers in v2
                 Cfg[key] := Integer(val)
-            else if (defaultVal is Float)
+            } else if (defaultVal is Float) {
                 Cfg[key] := Float(val)
-            else if (defaultVal is Number)
+            } else if (defaultVal is Number) {
                 Cfg[key] := val + 0
-            else
+            } else {
                 Cfg[key] := val
+            }
         } catch Error as e {
             ; skip bad key
         }
@@ -696,11 +766,11 @@ ResetLifetimeStats() {
 
 PullCfgFromGui() {
     global Cfg
-    Cfg["CheckIntervalSec"]    := Integer(CheckIntervalEdit.Text)
-    Cfg["MaxAttempts"]         := Integer(MaxAttemptsEdit.Text)
-    Cfg["CooldownSec"]         := Integer(CooldownEdit.Text)
+    Cfg["CheckIntervalSec"]    := SafeInt(CheckIntervalEdit.Text, Cfg["CheckIntervalSec"])
+    Cfg["MaxAttempts"]         := SafeInt(MaxAttemptsEdit.Text, Cfg["MaxAttempts"])
+    Cfg["CooldownSec"]         := SafeInt(CooldownEdit.Text, Cfg["CooldownSec"])
     Cfg["BackoffEnabled"]      := (BackoffCheck.Value = 1)
-    Cfg["JitterSec"]           := Integer(JitterEdit.Text)
+    Cfg["JitterSec"]           := SafeInt(JitterEdit.Text, Cfg["JitterSec"])
     Cfg["InternetCheck"]       := (InternetCheckBox.Value = 1)
     Cfg["MinimizeAfterJoin"]   := (MinAfterJoinCheck.Value = 1)
     Cfg["AlwaysOnTopRoblox"]   := (AlwaysTopRobloxCheck.Value = 1)
@@ -709,14 +779,14 @@ PullCfgFromGui() {
     Cfg["BrowserList"]         := BrowserListEdit.Text
     Cfg["AntiAfkEnabled"]      := (AntiAfkCheck.Value = 1)
     Cfg["AntiAfkMethod"]       := AntiAfkMethodDDL.Text
-    Cfg["AntiAfkIntervalSec"]  := Integer(AntiAfkIntervalEdit.Text)
-    Cfg["AntiAfkJitterSec"]    := Integer(AntiAfkJitterEdit.Text)
+    Cfg["AntiAfkIntervalSec"]  := SafeInt(AntiAfkIntervalEdit.Text, Cfg["AntiAfkIntervalSec"])
+    Cfg["AntiAfkJitterSec"]    := SafeInt(AntiAfkJitterEdit.Text, Cfg["AntiAfkJitterSec"])
     Cfg["AntiAfkKey"]          := AntiAfkKeyDDL.Text
     Cfg["AntiAfkOnlyFocused"]  := (AntiAfkFocusCheck.Value = 1)
     Cfg["AntiAfkPauseDuringReconnect"] := (AntiAfkPauseReconCheck.Value = 1)
     Cfg["SoundEnabled"]        := (SoundCheck.Value = 1)
     Cfg["SoundOnConnect"]      := SoundConnectEdit.Text
-    Cfg["SoundVolume"]         := Integer(SoundVolSlider.Value)
+    Cfg["SoundVolume"]         := SafeInt(SoundVolSlider.Value, Cfg["SoundVolume"])
     Cfg["DiscordEnabled"]      := (DiscordCheck.Value = 1)
     Cfg["DiscordWebhook"]      := DiscordUrlEdit.Text
     Cfg["NotifyOnConnect"]     := (NotifyConnCheck.Value = 1)
@@ -727,11 +797,11 @@ PullCfgFromGui() {
     Cfg["StartMinimized"]      := (StartMinimizedCheck.Value = 1)
     Cfg["AlwaysOnTopGui"]      := (AlwaysTopGuiCheck.Value = 1)
     Cfg["AutoStartWithWindows"]:= (AutoStartWinCheck.Value = 1)
-    Cfg["DelayedStartSec"]     := Integer(DelayedStartEdit.Text)
+    Cfg["DelayedStartSec"]     := SafeInt(DelayedStartEdit.Text, Cfg["DelayedStartSec"])
     Cfg["StopAtHHMM"]          := StopAtEdit.Text
     Cfg["PreventSleep"]        := (PreventSleepCheck.Value = 1)
     Cfg["PauseOnBattery"]      := (PauseOnBatteryCheck.Value = 1)
-    Cfg["StopAfterReconnects"] := Integer(StopAfterReconEdit.Text)
+    Cfg["StopAfterReconnects"] := SafeInt(StopAfterReconEdit.Text, Cfg["StopAfterReconnects"])
     Cfg["LogLevel"]            := LogLevelDDL.Text
     Cfg["LogToFile"]           := (LogToFileCheck.Value = 1)
     Cfg["HideLinksInLogs"]     := (HideLinksCheck.Value = 1)
@@ -741,9 +811,26 @@ PullCfgFromGui() {
     Cfg["AutoUpdateCheck"]     := (AutoUpdateCheck.Value = 1)
     Cfg["StartMonitoringOnLaunch"] := (StartMonOnLaunchCheck.Value = 1)
     Cfg["AutoRejoinEnabled"]   := (AutoRejoinCheck.Value = 1)
-    Cfg["RejoinHours"]         := Integer(RejoinHoursEdit.Text)
-    Cfg["RejoinMinutes"]       := Integer(RejoinMinsEdit.Text)
+    Cfg["RejoinHours"]         := SafeInt(RejoinHoursEdit.Text, Cfg["RejoinHours"])
+    Cfg["RejoinMinutes"]       := SafeInt(RejoinMinsEdit.Text, Cfg["RejoinMinutes"])
     Cfg["RotateProfiles"]      := (RotateProfilesCheck.Value = 1)
+    ; --- V3.2 disconnect-detection controls ---
+    Cfg["DetectViaLog"]        := (DetectViaLogCheck.Value = 1)
+    Cfg["DetectViaHang"]       := (DetectViaHangCheck.Value = 1)
+    Cfg["HangGraceSec"]        := SafeInt(HangGraceEdit.Text, Cfg["HangGraceSec"])
+    Cfg["LogTailIntervalSec"]  := SafeInt(LogTailIntervalEdit.Text, Cfg["LogTailIntervalSec"])
+}
+
+; Parse text/value as integer; return fallback when blank or invalid.
+; Prevents TypeError when user clears a "Number"-styled Edit control.
+SafeInt(value, fallback) {
+    if (value = "")
+        return fallback
+    try {
+        return Integer(value)
+    } catch Error as e {
+        return fallback
+    }
 }
 
 PushCfgToGui() {
@@ -796,6 +883,10 @@ PushCfgToGui() {
     RejoinHoursEdit.Text      := Cfg["RejoinHours"]
     RejoinMinsEdit.Text       := Cfg["RejoinMinutes"]
     RotateProfilesCheck.Value := Cfg["RotateProfiles"] ? 1 : 0
+    DetectViaLogCheck.Value   := Cfg["DetectViaLog"] ? 1 : 0
+    DetectViaHangCheck.Value  := Cfg["DetectViaHang"] ? 1 : 0
+    HangGraceEdit.Text        := Cfg["HangGraceSec"]
+    LogTailIntervalEdit.Text  := Cfg["LogTailIntervalSec"]
     RefreshHotkeysSummary()
 }
 
@@ -854,7 +945,9 @@ ResetDefaults() {
         "RememberWindowPos",true, "WindowX",-1, "WindowY",-1, "WindowW",580, "WindowH",580,
         "Hotkey_ToggleMonitor","F1", "Hotkey_Reconnect","F2", "Hotkey_Minimize","F3",
         "Hotkey_AntiAfk","F4", "Hotkey_Emergency","^+r", "Hotkey_Panic","^+q",
-        "AutoUpdateCheck",true
+        "AutoUpdateCheck",true,
+        "DetectViaLog",true, "DetectViaHang",true,
+        "HangGraceSec",15, "LogTailIntervalSec",3
     )
     SaveConfig()
     PushCfgToGui()
@@ -1161,6 +1254,14 @@ CopyActiveLink() {
         MsgBox("No active profile.", APP_NAME, 48)
         return
     }
+    if (p["type"] = "private" && !IsValidVipLink(p["link"])) {
+        MsgBox("Active profile has no valid VIP link.", APP_NAME, 48)
+        return
+    }
+    if (p["type"] = "public" && !IsValidGameId(p["gameId"])) {
+        MsgBox("Active profile has no valid Game ID.", APP_NAME, 48)
+        return
+    }
     A_Clipboard := GetProfileTarget(p)
     StatusBar.SetText("Copied target to clipboard")
 }
@@ -1169,6 +1270,16 @@ OpenActiveInBrowser() {
     p := GetActiveProfile()
     if (!p)
         return
+    ; SECURITY: Run() ShellExecutes whatever string is passed - never invoke
+    ; on profile data without re-validating, even if validated at import.
+    if (p["type"] = "private" && !IsValidVipLink(p["link"])) {
+        MsgBox("Active profile has no valid VIP link.", APP_NAME, 48)
+        return
+    }
+    if (p["type"] = "public" && !IsValidGameId(p["gameId"])) {
+        MsgBox("Active profile has no valid Game ID.", APP_NAME, 48)
+        return
+    }
     url := GetProfileTarget(p)
     try {
         Run(url)
@@ -1255,9 +1366,15 @@ StartMonitoring(*) {
     }
     IsMonitoringActive := true
     ReconnectAttempts := 0
-    intervalMs := Cfg["CheckIntervalSec"] * 1000
+    ; Clamp: CheckIntervalSec=0 would call SetTimer(...,0) which DISABLES the
+    ; timer in AHK v2, silently disabling monitoring while the UI says ACTIVE.
+    intervalMs := Max(1, Cfg["CheckIntervalSec"]) * 1000
     CheckTimer := MonitorTick
     SetTimer(CheckTimer, intervalMs)
+
+    if (Cfg["DetectViaLog"]) {
+        StartLogTail()
+    }
 
     if (Cfg["AutoRejoinEnabled"]) {
         totalMs := (Cfg["RejoinHours"] * 3600000) + (Cfg["RejoinMinutes"] * 60000)
@@ -1286,13 +1403,24 @@ StartMonitoring(*) {
 }
 
 StopMonitoring(*) {
-    global IsMonitoringActive, CheckTimer, RejoinTimer, SleepPreventTimer
+    global IsMonitoringActive, CheckTimer, RejoinTimer, SleepPreventTimer, LogTailTimer
+    global HangFirstSeenAt, DeferredReconnectTimer, ReconnectInProgress
     if (!IsMonitoringActive)
         return
     IsMonitoringActive := false
+    HangFirstSeenAt := 0
     if (CheckTimer) {
         try SetTimer(CheckTimer, 0)
         CheckTimer := ""
+    }
+    if (LogTailTimer) {
+        StopLogTail()
+    }
+    if (DeferredReconnectTimer) {
+        try SetTimer(DeferredReconnectTimer, 0)
+        DeferredReconnectTimer := ""
+        ReconnectInProgress := false
+        Log("Deferred reconnect cancelled by Stop", "Info")
     }
     if (RejoinTimer) {
         try SetTimer(RejoinTimer, 0)
@@ -1318,13 +1446,21 @@ ToggleMonitoring(*) {
 }
 
 PanicStop(*) {
-    global IsAntiAfkActive
+    global IsAntiAfkActive, DeferredReconnectTimer, ReconnectInProgress
     StopMonitoring()
     if (IsAntiAfkActive)
         ToggleAntiAfk(false)
     if (StopAtTimer) {
         try SetTimer(StopAtTimer, 0)
     }
+    ; Belt-and-braces: a manual F2 reconnect can arm DeferredReconnectTimer
+    ; / ReconnectInProgress without monitoring being active, and
+    ; StopMonitoring early-returns in that case. Clear them unconditionally.
+    if (DeferredReconnectTimer) {
+        try SetTimer(DeferredReconnectTimer, 0)
+        DeferredReconnectTimer := ""
+    }
+    ReconnectInProgress := false
     Log("PANIC STOP - all automation halted", "Warn")
     TrayNotify(APP_NAME, "All automation stopped", "Warn")
 }
@@ -1335,14 +1471,16 @@ EmergencyReconnect(*) {
 }
 
 MonitorTick() {
-    global IsMonitoringActive, LifetimeCrashes
-    if (!IsMonitoringActive)
+    global IsMonitoringActive, LifetimeCrashes, Cfg, HangFirstSeenAt
+    global LastLaunchTickCount, ReconnectInProgress
+    if (!IsMonitoringActive || ReconnectInProgress)
         return
     try {
         if (!ProcessExist("RobloxPlayerBeta.exe")) {
             LifetimeCrashes += 1
             SaveStats()
             Log("Roblox not running - triggering reconnect", "Warn")
+            HangFirstSeenAt := 0
             TriggerReconnect("process exit")
             return
         }
@@ -1357,23 +1495,69 @@ MonitorTick() {
                 || InStr(txt, "lost connection") || InStr(txt, "error code")
                 || InStr(txt, "Reconnect")) {
                 Log("Error dialog detected - triggering reconnect", "Warn")
+                pid := 0
+                try pid := WinGetPID("ahk_class #32770 ahk_exe RobloxPlayerBeta.exe")
                 try WinClose("ahk_class #32770 ahk_exe RobloxPlayerBeta.exe")
                 Sleep(800)
-                TriggerReconnect("error dialog")
+                HangFirstSeenAt := 0
+                TriggerReconnect("error dialog", pid)
                 return
             }
         }
         wins := WinGetList("ahk_exe RobloxPlayerBeta.exe")
+        hungHwnd := 0
+        hungPid  := 0
         for hwnd in wins {
             try {
                 title := WinGetTitle("ahk_id " . hwnd)
                 if (InStr(title, "Disconnected") || InStr(title, "Lost connection") || InStr(title, "Error")) {
                     Log("Disconnect title detected: " . title, "Warn")
-                    TriggerReconnect("window title")
+                    pid := 0
+                    try pid := WinGetPID("ahk_id " . hwnd)
+                    HangFirstSeenAt := 0
+                    TriggerReconnect("window title", pid)
                     return
+                }
+                if (Cfg["DetectViaHang"] && hungHwnd = 0 && IsRobloxHung(hwnd)) {
+                    hungHwnd := hwnd
+                    try hungPid := WinGetPID("ahk_id " . hwnd)
                 }
             } catch Error as e {
                 ;
+            }
+        }
+        if (Cfg["DetectViaHang"]) {
+            ; Post-launch grace: Roblox routinely freezes during shader compile
+            ; and first-place download (5-30s). Suppress hang detection for
+            ; (HangGraceSec + 30) seconds after every Run(target) to avoid
+            ; a kill-loop on slower machines.
+            postLaunchGraceMs := (Max(0, Cfg["HangGraceSec"]) + 30) * 1000
+            inPostLaunchGrace := (LastLaunchTickCount > 0
+                && (A_TickCount - LastLaunchTickCount) < postLaunchGraceMs)
+            if (inPostLaunchGrace) {
+                if (hungHwnd != 0)
+                    Log("Hang detected during post-launch grace - ignoring", "Debug")
+                HangFirstSeenAt := 0
+            } else if (hungHwnd != 0) {
+                if (HangFirstSeenAt = 0) {
+                    HangFirstSeenAt := A_TickCount
+                    Log("Roblox window appears hung (HWND " . hungHwnd . ") - starting grace timer", "Debug")
+                } else {
+                    elapsed := (A_TickCount - HangFirstSeenAt) / 1000
+                    ; Clamp grace at the use site so a maliciously-edited INI or
+                    ; pasted negative value cannot defeat the post-launch grace
+                    ; (which would create a kill-loop during shader compile).
+                    graceSec := Max(0, Cfg["HangGraceSec"])
+                    if (elapsed >= graceSec) {
+                        Log("Roblox hung for " . Round(elapsed) . "s (>= " . graceSec . "s grace) - triggering reconnect", "Warn")
+                        HangFirstSeenAt := 0
+                        TriggerReconnect("hung window", hungPid)
+                        return
+                    }
+                }
+            } else if (HangFirstSeenAt != 0) {
+                Log("Roblox window recovered before grace period elapsed - clearing hang flag", "Debug")
+                HangFirstSeenAt := 0
             }
         }
     } catch Error as e {
@@ -1381,14 +1565,16 @@ MonitorTick() {
     }
 }
 
-TriggerReconnect(reason) {
-    global LastReconnectTime, ReconnectAttempts, Cfg
+TriggerReconnect(reason, pid := 0) {
+    global LastReconnectTime, ReconnectAttempts, Cfg, LastReconnectReason
     now := A_TickCount
     cooldownMs := Cfg["CooldownSec"] * 1000
     if (Cfg["BackoffEnabled"] && ReconnectAttempts > 0)
         cooldownMs := cooldownMs * (2 ** Min(ReconnectAttempts, 5))
     if (LastReconnectTime > 0 && (now - LastReconnectTime) < cooldownMs) {
-        Log("In cooldown (" . Round((cooldownMs - (now - LastReconnectTime)) / 1000) . "s remaining), skipping", "Debug")
+        remainSec := Round((cooldownMs - (now - LastReconnectTime)) / 1000)
+        Log("In cooldown (" . remainSec . "s remaining), skipping", "Info")
+        try StatusBar.SetText("Cooldown - " . remainSec . "s until next reconnect")
         return
     }
     if (Cfg["MaxAttempts"] > 0 && ReconnectAttempts >= Cfg["MaxAttempts"]) {
@@ -1399,8 +1585,9 @@ TriggerReconnect(reason) {
     }
     ReconnectAttempts += 1
     LastReconnectTime := now
-    Log("Reconnect #" . ReconnectAttempts . " reason: " . reason, "Info")
-    ReconnectToGame()
+    LastReconnectReason := reason
+    Log("Reconnect #" . ReconnectAttempts . " reason: " . reason . (pid ? " (pid " . pid . ")" : ""), "Info")
+    ReconnectToGame(pid)
 }
 
 AutoRejoinTick() {
@@ -1411,13 +1598,15 @@ AutoRejoinTick() {
 ManualReconnect(*) {
     global ReconnectAttempts, LastReconnectTime
     ReconnectAttempts := 0
-    LastReconnectTime := 0
+    LastReconnectTime := A_TickCount  ; gate concurrent detector triggers (B2 fix)
     ReconnectToGame()
 }
 
-ReconnectToGame() {
+ReconnectToGame(targetPid := 0) {
     global Cfg, LifetimeReconnects, Profiles, ActiveProfileIdx, IsAntiAfkPaused
-    global SuccessfulReconnects, FailedReconnects
+    global SuccessfulReconnects, FailedReconnects, LogTailFile, LogTailPos
+    global ReconnectInProgress, HangFirstSeenAt, LastLaunchTickCount, ReconnectAttempts
+    global LastLaunchPid, LastReconnectReason, DeferredReconnectTimer, IsMonitoringActive
     if (Cfg["RotateProfiles"] && Profiles.Length > 1) {
         ActiveProfileIdx := Mod(ActiveProfileIdx, Profiles.Length) + 1
         try RefreshProfileDropDown()
@@ -1438,52 +1627,115 @@ ReconnectToGame() {
     }
     if (Cfg["InternetCheck"] && !CheckInternet()) {
         Log("No internet - deferring reconnect 15s", "Warn")
-        SetTimer(() => ReconnectToGame(), -15000)
+        ; Track the deferred timer so Stop/Panic can cancel it; also keep
+        ; ReconnectInProgress armed so detectors don't race in the meantime.
+        ReconnectInProgress := true
+        try StatusBar.SetText("Reconnect deferred 15s (no internet)")
+        if (DeferredReconnectTimer) {
+            try SetTimer(DeferredReconnectTimer, 0)
+        }
+        DeferredReconnectTimer := () => DeferredReconnectFire(targetPid)
+        SetTimer(DeferredReconnectTimer, -15000)
         return
     }
     if (Cfg["AntiAfkPauseDuringReconnect"] && IsAntiAfkActive)
         IsAntiAfkPaused := true
-    Log("Reconnecting to " . p["name"] . " ...", "Info")
-    Notify("disconnect", APP_NAME, "Reconnecting to " . p["name"])
+    reasonTxt := (LastReconnectReason != "") ? LastReconnectReason : "manual"
+    Log("Reconnecting to " . p["name"] . " (" . reasonTxt . ") ...", "Info")
+    Notify("disconnect", APP_NAME, "Reconnecting to " . p["name"] . " (" . reasonTxt . ")")
+    try StatusText.Text := "Reconnecting - " . reasonTxt . " ..."
+    try StatusText.Opt("+cBlue")
+    ; B2 fix: set re-entrancy guard and zero log-tail offset BEFORE killing
+    ; the old process, so MonitorTick/LogTailTick cannot run during the
+    ; Sleep windows below and read the dying session's shutdown messages.
+    ReconnectInProgress := true
+    HangFirstSeenAt := 0
+    LogTailFile := ""
+    LogTailPos := 0
     try {
-        if (ProcessExist("RobloxPlayerBeta.exe")) {
-            ProcessClose("RobloxPlayerBeta.exe")
-            Sleep(1500)
-            Loop 10 {
-                if (!ProcessExist("RobloxPlayerBeta.exe"))
-                    break
-                Sleep(400)
-            }
-        }
+        CloseRobloxInstance(targetPid)
         jitter := Cfg["JitterSec"] > 0 ? Random(0, Cfg["JitterSec"] * 1000) : 0
         Sleep(1000 + jitter)
-        Run(target)
+        newPid := 0
+        Run(target, , , &newPid)
+        LastLaunchPid := newPid
+        LastLaunchTickCount := A_TickCount  ; B4: arm post-launch hang grace
+        ; R2 success-check fix: poll for OUR launched PID, not any
+        ; RobloxPlayerBeta.exe (per-PID close can leave siblings running
+        ; and the old "ProcessExist(name)" check would declare instant
+        ; false success in multi-instance setups).
+        launched := false
         Loop 30 {
-            if (ProcessExist("RobloxPlayerBeta.exe")) {
-                Log("Roblox launched, waiting for load...", "Info")
-                Sleep(8000)
-                LifetimeReconnects += 1
-                SuccessfulReconnects += 1
-                SaveStats()
-                Log("Joined " . p["name"] . " successfully", "Info")
-                Notify("connect", APP_NAME, "Joined " . p["name"])
-                PostJoinHooks()
-                IsAntiAfkPaused := false
-                CheckLifetimeStopCap()
-                return
+            ; ShellExecute via roblox:// URI scheme returns no PID; fall
+            ; back to "any RobloxPlayerBeta.exe spawned after our launch
+            ; tick" detection in that case.
+            if (newPid > 0) {
+                if (ProcessExist(newPid)) {
+                    launched := true
+                    break
+                }
+            } else {
+                ; URI-launched: wait for ANY new RobloxPlayerBeta.exe.
+                ; CloseRobloxInstance already exited the targeted pid;
+                ; if a Roblox process exists now, it's our new one or a
+                ; pre-existing sibling - either way, good enough.
+                if (ProcessExist("RobloxPlayerBeta.exe")) {
+                    launched := true
+                    break
+                }
             }
             Sleep(1000)
+        }
+        if (launched) {
+            Log("Roblox launched, waiting for load...", "Info")
+            Sleep(8000)
+            LifetimeReconnects += 1
+            SuccessfulReconnects += 1
+            ReconnectAttempts := 0  ; B6: backoff is per-incident, not lifetime
+            SaveStats()
+            Log("Joined " . p["name"] . " successfully", "Info")
+            Notify("connect", APP_NAME, "Joined " . p["name"])
+            try StatusText.Text := "Monitoring ACTIVE - joined " . p["name"]
+            try StatusText.Opt("+cGreen")
+            PostJoinHooks()
+            IsAntiAfkPaused := false
+            ReconnectInProgress := false
+            LastReconnectReason := ""
+            CheckLifetimeStopCap()
+            return
         }
         FailedReconnects += 1
         Log("Roblox did not start within 30s", "Error")
         Notify("error", APP_NAME, "Roblox did not start within 30s")
         IsAntiAfkPaused := false
+        ReconnectInProgress := false
+        LastReconnectReason := ""
     } catch Error as e {
         FailedReconnects += 1
         Log("Reconnect error: " . e.Message, "Error")
         Notify("error", APP_NAME, "Reconnect error: " . e.Message)
         IsAntiAfkPaused := false
+        ReconnectInProgress := false
+        LastReconnectReason := ""
     }
+}
+
+; Wrapped deferred-reconnect callback. Re-checks monitoring state because
+; the user may have hit Stop or Panic during the 15-second deferral
+; (DeferredReconnectTimer is cancelled in those handlers; this re-check
+; is belt-and-braces in case the callback was already queued).
+DeferredReconnectFire(targetPid) {
+    global IsMonitoringActive, ReconnectInProgress, DeferredReconnectTimer
+    DeferredReconnectTimer := ""
+    if (!IsMonitoringActive) {
+        Log("Deferred reconnect cancelled (monitoring stopped)", "Info")
+        ReconnectInProgress := false
+        return
+    }
+    ; Re-enter ReconnectToGame; it will perform its own InternetCheck
+    ; and re-defer if still offline.
+    ReconnectInProgress := false  ; let ReconnectToGame re-arm cleanly
+    ReconnectToGame(targetPid)
 }
 
 CheckLifetimeStopCap() {
@@ -1680,6 +1932,20 @@ DoAntiAfkAction(manual) {
             MouseMove(mx, my, 0)
         } else {
             key := Cfg["AntiAfkKey"]
+            ; Whitelist guard: AntiAfkKey is offered as a DropDownList in the
+            ; GUI but config.ini is hand-editable. Prevent Send-syntax
+            ; injection (e.g. "Space down}{LWin down}r{LWin up}...") by
+            ; restricting to the known-safe set.
+            static ALLOWED_KEYS := Map(
+                "Space", 1, "w", 1, "a", 1, "s", 1, "d", 1,
+                "Up", 1, "Down", 1, "Left", 1, "Right", 1,
+                "Shift", 1, "Ctrl", 1, "Alt", 1,
+                "F13", 1, "F14", 1, "F15", 1
+            )
+            if (!ALLOWED_KEYS.Has(key)) {
+                Log("Anti-AFK: rejecting invalid key '" . key . "' (not in whitelist); falling back to Space", "Warn")
+                key := "Space"
+            }
             Send("{" . key . " down}")
             Sleep(50)
             Send("{" . key . " up}")
@@ -1824,6 +2090,10 @@ SanitizeForLog(s) {
     s := RegExReplace(s, "i)roblox://[^\s]+", "roblox://[REDACTED]")
     s := RegExReplace(s, "i)linkCode=[A-Za-z0-9_\-]+", "linkCode=[REDACTED]")
     s := RegExReplace(s, "i)accessCode=[A-Za-z0-9_\-]+", "accessCode=[REDACTED]")
+    ; Discord webhook tokens (forward-looking defense; future error paths may
+    ; log the URL). Token leak grants permanent channel-write to anyone.
+    s := RegExReplace(s, "i)https?://(?:[a-z]+\.)?discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_\-]+",
+        "https://discord.com/api/webhooks/[REDACTED]")
     return s
 }
 
@@ -2307,6 +2577,20 @@ ParseProfilesJson(text) {
             p["name"] := "Imported"
         if (p["type"] != "private" && p["type"] != "public")
             p["type"] := "private"
+        ; SECURITY: drop entries whose link/gameId fail validation. Without
+        ; this, malicious JSON could plant a profile whose "link" is e.g.
+        ; "cmd.exe /c ..." that would later ShellExecute via OpenActiveInBrowser,
+        ; CopyActiveLink, or TestSelectedProfile.
+        if (p["type"] = "private" && p["link"] != "" && !IsValidVipLink(p["link"])) {
+            Log("Imported profile '" . p["name"] . "' has invalid VIP link - skipping", "Warn")
+            pos := objEnd + 1
+            continue
+        }
+        if (p["type"] = "public" && p["gameId"] != "" && !IsValidGameId(p["gameId"])) {
+            Log("Imported profile '" . p["name"] . "' has invalid Game ID - skipping", "Warn")
+            pos := objEnd + 1
+            continue
+        }
         out.Push(p)
         pos := objEnd + 1
     }
@@ -2328,11 +2612,15 @@ ReadJsonBool(chunk, key) {
 }
 
 UnescapeJson(s) {
+    ; Process \\ first via a placeholder so that a literal "\\n" in the JSON
+    ; (intended as backslash-then-n) is NOT mis-decoded as a newline.
+    s := StrReplace(s, "\\", "`x01")
     s := StrReplace(s, "\n", "`n")
     s := StrReplace(s, "\r", "`r")
     s := StrReplace(s, "\t", "`t")
     s := StrReplace(s, '\"', '"')
-    s := StrReplace(s, "\\", "\")
+    s := StrReplace(s, "/", "/")
+    s := StrReplace(s, "`x01", "\")
     return s
 }
 
@@ -2403,13 +2691,29 @@ RunSelfTest() {
     out .= "• Config file: " . (FileExist(CONFIG_FILE) ? "OK" : "not yet created") . "`n"
     out .= "• Profiles file: " . (FileExist(PROFILES_FILE) ? "OK (" . Profiles.Length . " profile(s))" : "not yet created") . "`n"
     out .= "• Internet: " . (CheckInternet() ? "OK" : "FAIL") . "`n"
-    out .= "• Roblox installed: " . (FileExist(A_AppData . "\..\Local\Roblox\Versions") || FileExist("C:\Program Files (x86)\Roblox") ? "likely" : "not detected") . "`n"
+    out .= "• Roblox installed: " . (FileExist(EnvGet("LOCALAPPDATA") . "\Roblox\Versions") || FileExist("C:\Program Files (x86)\Roblox") ? "likely" : "not detected") . "`n"
     out .= "• Roblox running: " . (ProcessExist("RobloxPlayerBeta.exe") ? "yes" : "no") . "`n"
     out .= "• Roblox status API: " . CheckRobloxStatus(false) . "`n"
     out .= "• Discord webhook: " . (Cfg["DiscordEnabled"] && Cfg["DiscordWebhook"] != "" ? "configured" : "not configured") . "`n"
     out .= "• Active profile: " . (GetActiveProfile() ? GetActiveProfile()["name"] : "(none)") . "`n"
     out .= "• Anti-AFK enabled: " . (Cfg["AntiAfkEnabled"] ? "yes" : "no") . "`n"
     out .= "• On battery: " . (IsOnBattery() ? "yes" : "no") . "`n"
+    ; V3.2 disconnect-detection diagnostics
+    local logDir := EnvGet("LOCALAPPDATA") . "\Roblox\logs"
+    out .= "`n[Disconnect Detection - V3.2]`n"
+    out .= "• Roblox log dir: " . (DirExist(logDir) ? "OK (" . logDir . ")" : "MISSING") . "`n"
+    local latestLog := GetLatestRobloxLog()
+    out .= "• Latest Roblox log: " . (latestLog != "" ? latestLog : "(none)") . "`n"
+    out .= "• Detect via log: " . (Cfg["DetectViaLog"] ? "ON (poll " . Cfg["LogTailIntervalSec"] . "s)" : "OFF") . "`n"
+    out .= "• Detect via hang: " . (Cfg["DetectViaHang"] ? "ON (grace " . Cfg["HangGraceSec"] . "s + " . (Cfg["HangGraceSec"] + 30) . "s post-launch)" : "OFF") . "`n"
+    local hungOk := false
+    try {
+        DllCall("user32\IsHungAppWindow", "Ptr", 0, "Int")
+        hungOk := true
+    } catch Error as e {
+        hungOk := false
+    }
+    out .= "• IsHungAppWindow callable: " . (hungOk ? "yes (user32.dll)" : "no") . "`n"
     MsgBox(out, APP_NAME . " - Self-test", 64)
 }
 
@@ -2461,4 +2765,230 @@ CompareVersions(a, b) {
             return -1
     }
     return 0
+}
+
+; ============================================================================
+; V3.2 - Disconnect detection helpers (log tail, hung-window, per-PID close)
+; ============================================================================
+
+; --- Hung-window detection -----------------------------------------------
+; Returns true if Windows considers the given HWND unresponsive.
+; Uses Win32 IsHungAppWindow (user32.dll), the same API Task Manager uses
+; to mark windows as "Not Responding".
+IsRobloxHung(hwnd) {
+    try {
+        return DllCall("user32\IsHungAppWindow", "Ptr", hwnd, "Int")
+    } catch Error as e {
+        return false
+    }
+}
+
+; --- Per-PID close --------------------------------------------------------
+; If pid > 0, closes only that specific RobloxPlayerBeta.exe instance.
+; If pid = 0, falls back to closing the first/all Roblox processes
+; (preserves the original V3.1 behaviour for single-instance setups).
+CloseRobloxInstance(pid := 0) {
+    if (pid > 0) {
+        if (ProcessExist(pid)) {
+            Log("Closing Roblox PID " . pid, "Debug")
+            try ProcessClose(pid)
+            Sleep(1500)
+            Loop 10 {
+                if (!ProcessExist(pid))
+                    break
+                Sleep(400)
+            }
+            if (ProcessExist(pid)) {
+                Log("PID " . pid . " did not exit after ProcessClose; forcing kill", "Warn")
+                try RunWait('taskkill /F /PID ' . pid, , "Hide")
+            }
+        }
+        return
+    }
+    ; No specific PID provided: close every Roblox client instance.
+    closed := 0
+    Loop {
+        existingPid := ProcessExist("RobloxPlayerBeta.exe")
+        if (!existingPid)
+            break
+        try ProcessClose(existingPid)
+        Sleep(800)
+        closed += 1
+        if (closed > 8)
+            break  ; safety
+    }
+    Sleep(700)
+    Loop 10 {
+        if (!ProcessExist("RobloxPlayerBeta.exe"))
+            break
+        Sleep(400)
+    }
+    if (ProcessExist("RobloxPlayerBeta.exe")) {
+        Log("RobloxPlayerBeta.exe still alive after ProcessClose loop; forcing taskkill", "Warn")
+        try RunWait('taskkill /F /IM RobloxPlayerBeta.exe', , "Hide")
+    }
+}
+
+; --- Log-file tailing -----------------------------------------------------
+; Locates the newest log file in %LOCALAPPDATA%\Roblox\logs and returns
+; its full path, or "" if none.
+GetLatestRobloxLog() {
+    local logDir := EnvGet("LOCALAPPDATA") . "\Roblox\logs"
+    if (!DirExist(logDir))
+        return ""
+    local newest := ""
+    local newestTime := 0
+    Loop Files, logDir . "\*.log" {
+        if (A_LoopFileTimeModified > newestTime) {
+            newestTime := A_LoopFileTimeModified
+            newest := A_LoopFileFullPath
+        }
+    }
+    return newest
+}
+
+StartLogTail() {
+    global LogTailTimer, LogTailFile, LogTailPos, Cfg
+    if (LogTailTimer)
+        return  ; already running
+    LogTailFile := ""
+    LogTailPos := 0
+    LogTailTimer := LogTailTick
+    local ivMs := Max(1, Cfg["LogTailIntervalSec"]) * 1000
+    SetTimer(LogTailTimer, ivMs)
+    Log("Log-tail monitoring started (interval " . Cfg["LogTailIntervalSec"] . "s)", "Debug")
+}
+
+StopLogTail() {
+    global LogTailTimer
+    if (!LogTailTimer)
+        return
+    try SetTimer(LogTailTimer, 0)
+    LogTailTimer := ""
+    Log("Log-tail monitoring stopped", "Debug")
+}
+
+; Wired to the Monitor-tab DetectViaLog/DetectViaHang checkboxes so that
+; flipping them takes effect immediately without requiring a Save Settings
+; round-trip or a stop/start of monitoring.
+OnDetectionToggle() {
+    global Cfg, IsMonitoringActive, LogTailTimer, HangFirstSeenAt
+    Cfg["DetectViaLog"]  := (DetectViaLogCheck.Value = 1)
+    Cfg["DetectViaHang"] := (DetectViaHangCheck.Value = 1)
+    if (IsMonitoringActive) {
+        if (Cfg["DetectViaLog"] && !LogTailTimer)
+            StartLogTail()
+        else if (!Cfg["DetectViaLog"] && LogTailTimer)
+            StopLogTail()
+    }
+    if (!Cfg["DetectViaHang"])
+        HangFirstSeenAt := 0
+}
+
+; Reads any new bytes from the newest Roblox log file and scans them for
+; disconnect-related patterns. If detected, triggers a reconnect.
+LogTailTick() {
+    global IsMonitoringActive, LogTailFile, LogTailPos, Cfg, ReconnectInProgress
+    if (!IsMonitoringActive || !Cfg["DetectViaLog"] || ReconnectInProgress)
+        return
+    try {
+        local latest := GetLatestRobloxLog()
+        if (latest = "")
+            return
+        ; New log file (new Roblox session): jump to its current end so we
+        ; don't replay backlog (which would include the previous session's
+        ; DataModel::close and trigger an immediate false-positive).
+        if (latest != LogTailFile) {
+            ; Only commit LogTailFile AFTER successfully reading the new
+            ; file's size. If FileOpen fails (transient lock, AV scan), we
+            ; leave LogTailFile pointing at the previous file so the next
+            ; tick retries the new-file branch instead of falling into the
+            ; "same-file" branch and replaying the entire backlog.
+            local newPos := -1
+            try {
+                local fSize := FileOpen(latest, "r")
+                if (fSize) {
+                    newPos := fSize.Length
+                    fSize.Close()
+                }
+            } catch Error as e {
+                newPos := -1
+            }
+            if (newPos < 0)
+                return
+            LogTailFile := latest
+            LogTailPos := newPos
+            Log("Tailing Roblox log: " . latest . " (start offset " . LogTailPos . ")", "Debug")
+            return
+        }
+        local f := ""
+        try {
+            f := FileOpen(latest, "r")
+        } catch Error as e {
+            return  ; file may be locked momentarily
+        }
+        if (!f)
+            return
+        local total := f.Length
+        if (total < LogTailPos) {
+            ; File was truncated/rotated; skip pre-existing content (mirrors
+            ; the new-file branch above) to avoid replaying historical lines.
+            LogTailPos := total
+            f.Close()
+            return
+        }
+        if (total = LogTailPos) {
+            f.Close()
+            return
+        }
+        f.Pos := LogTailPos
+        local chunk := ""
+        try {
+            chunk := f.Read(total - LogTailPos)
+        } catch Error as e {
+            chunk := ""
+        }
+        LogTailPos := total
+        f.Close()
+        if (chunk = "")
+            return
+        local reason := DetectDisconnectInLog(chunk)
+        if (reason != "") {
+            Log("Roblox log indicates disconnect: " . reason, "Warn")
+            TriggerReconnect("log:" . reason)
+        }
+    } catch Error as e {
+        Log("LogTailTick error: " . e.Message, "Debug")
+    }
+}
+
+; Returns a short reason string if the supplied log chunk contains a
+; HIGH-CONFIDENCE disconnect indicator, or "" otherwise.
+;
+; IMPORTANT: bare `DataModel::close` and `NetworkClient::Disconnect` are
+; intentionally NOT matched here - Roblox emits both during legitimate
+; user actions (Leave Game, TeleportService place changes, returning to
+; the menu). Matching them caused false-positive reconnect loops that
+; fought users who teleported. Patterns retained below are strongly
+; correlated with involuntary disconnects.
+DetectDisconnectInLog(text) {
+    if (text = "")
+        return ""
+    if (InStr(text, "Disconnect with reason: Lost") || InStr(text, "Disconnect with reason: Timeout")
+        || InStr(text, "Disconnect with reason: KickedFromGame"))
+        return "Disconnect with reason"
+    if (InStr(text, "Disconnected from server"))
+        return "Disconnected from server"
+    if (InStr(text, "disconnected from the game"))
+        return "disconnected from the game"
+    if (InStr(text, "ReplicationTimeout") || InStr(text, "[FLog::Network] Time-out"))
+        return "network time-out"
+    if (InStr(text, "Lost connection to the game"))
+        return "connection lost"
+    if (InStr(text, "Error Code: 17") || InStr(text, "Error Code: 260")
+        || InStr(text, "Error Code: 264") || InStr(text, "Error Code: 268")
+        || InStr(text, "Error Code: 277") || InStr(text, "Error Code: 279")
+        || InStr(text, "Error Code: 522") || InStr(text, "Error Code: 772"))
+        return "error code"
+    return ""
 }

@@ -240,13 +240,29 @@ Legend: ✅ Implemented in V3 · 🟡 Partial / behind a flag · 🚧 Planned ·
 
 ---
 
+## V3.2 — Resilience pack (new section)
+
+201. ✅ Roblox log-file tailing for in-game disconnect detection (`%LOCALAPPDATA%\Roblox\logs`, catches "Disconnected" overlay while process is still running)
+202. ✅ Frozen/hung-window detection via Win32 `IsHungAppWindow` with configurable grace period
+203. ✅ Post-launch hang-detection suppression (avoids kill-loop during shader compile / first-place load)
+204. ✅ Per-PID close of the disconnected Roblox instance (multi-instance safe)
+205. ✅ Re-entrancy guard prevents detectors triggering a second reconnect while one is in progress
+206. ✅ High-confidence log-pattern filter (drops `DataModel::close` / `NetworkClient::Disconnect` to avoid false positives on teleports & manual leaves)
+207. ✅ Monitor-tab GUI surface for new detection flags (`DetectViaLog`, `DetectViaHang`, `HangGraceSec`, `LogTailIntervalSec`)
+208. ✅ `SafeInt` helper - cleared numeric Edit fields no longer crash Save Settings / window close
+209. ✅ `LoadConfig` boolean-key allowlist - integer-valued safety caps (`MaxAttempts`, `StopAfterReconnects`, `ActiveProfile`, `DelayedStartSec`, `RejoinMinutes`) no longer silently coerced to 0/1 across save/load cycles
+210. ✅ `ReconnectAttempts` reset on successful reconnect - backoff & MaxAttempts are now per-incident, not lifetime
+
+---
+
 ## Summary
 
-- **~90** features fully implemented in V3.1 (V3.0 baseline + 20 new)
-- **~110** planned / nice-to-have on the roadmap
+- **~115** features fully implemented in V3.2 (V3.1 baseline + 10 resilience-pack additions)
+- **~95** planned / nice-to-have on the roadmap (items marked 🚧)
+- New in V3.2 (items #201–#210): Roblox log-file tailing, hung-window detection, per-PID close, re-entrancy guard, post-launch grace, false-positive log-pattern filter, GUI surface for new flags, SafeInt helper, LoadConfig bool-key fix, ReconnectAttempts reset on success
 - New in V3.1: Roblox status check (#19), profile rotation (#34), profile import/export (#35/36), favorites (#38), profile filter (#39), window-pos persistence (#57), rebindable hotkeys (#73), pause Anti-AFK during reconnect (#102), volume slider (#109), stop-after-N (#122), pause-on-battery (#123), VIP link masking (#129), link-redaction in logs (#130), in-log search (#142), success-rate % (#155), CSV stats export (#157), config backups (#166), self-test (#170), auto-update check (#196), status-bar hints (#199, partial)
 - File layout:
-  - `RobloxReconnectV3.1.Ahk` — main script
+  - `RobloxReconnectV3.2.Ahk` — main script
   - `RobloxReconnect-Data/config.ini` — user config
   - `RobloxReconnect-Data/profiles.ini` — saved server profiles
   - `RobloxReconnect-Data/stats.ini` — lifetime counters

@@ -1,0 +1,14 @@
+# Runtime data directory created on first launch (contains personal config,
+# profiles with VIP links, stats, and logs - never commit).
+RobloxReconnect-Data/
+
+# AutoHotkey compiled output
+*.exe
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
+*~
