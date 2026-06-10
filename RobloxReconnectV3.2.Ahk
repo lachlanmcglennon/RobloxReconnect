@@ -35,7 +35,7 @@ SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
 global APP_NAME       := "Roblox Auto-Reconnect V3.2.1"
-global APP_VERSION    := "3.2.2"
+global APP_VERSION    := "3.2.3"
 global APP_AUTHOR     := "INNIE (V3.2.1 hotfix: phantom-crash loop)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
@@ -2987,20 +2987,31 @@ WaitForGameJoin(timeoutSec := 90) {
         Log("WaitForGameJoin: no Roblox log dir - cannot verify join, assuming OK", "Warn")
         return true  ; fail-open: don't kill a working session over a missing log
     }
-    ; Snapshot the file's current size; we only scan new content written
-    ; AFTER our launch, so we don't false-positive on a previous session's
-    ; "Connection accepted" line that's still in the same rotated log.
+    ; Decide starting offset:
+    ;   - If the log file was created in the last ~120s, it's THIS launch's
+    ;     log (Roblox starts a new file per session). Scan from offset 0 so
+    ;     we don't miss a "Connection accepted" line written BEFORE we got
+    ;     here (the join marker appears ~2-3s into the session).
+    ;   - Otherwise we're reusing a stale log file from a previous session,
+    ;     so snapshot current length and only watch NEW content to avoid
+    ;     false-positive on the previous session's marker.
     local startPos := 0
+    local reuseStale := false
     try {
-        local fInit := FileOpen(logPath, "r")
-        if (fInit) {
-            startPos := fInit.Length
-            fInit.Close()
+        local fi := FileGetTime(logPath, "C")  ; YYYYMMDDHH24MISS
+        local ageSec := DateDiff(A_Now, fi, "Seconds")
+        if (ageSec > 120) {
+            reuseStale := true
+            local fInit := FileOpen(logPath, "r")
+            if (fInit) {
+                startPos := fInit.Length
+                fInit.Close()
+            }
         }
     } catch Error as e {
-        Log("WaitForGameJoin: could not snapshot log size: " . e.Message, "Warn")
-        return true
+        Log("WaitForGameJoin: could not stat log: " . e.Message . " - scanning from start", "Warn")
     }
+    Log("WaitForGameJoin: tailing " . logPath . " from " . (reuseStale ? ("offset " . startPos . " (stale log)") : "start (fresh session)"), "Info")
     local deadline := A_TickCount + (timeoutSec * 1000)
     local currentLog := logPath
     local pos := startPos

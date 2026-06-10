@@ -188,6 +188,25 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.3
+*Critical hotfix: v3.2.2 WaitForGameJoin false-positive timeout.*
+- 🐛 **CRITICAL** `WaitForGameJoin` always snapshotted the log file's
+  current length before waiting, on the assumption it might be a stale
+  rotated log. But Roblox typically writes the `Connection accepted from
+  <ip>` marker **2–3 s after starting the session**, while our caller
+  doesn't enter `WaitForGameJoin` until the stable-launch check finishes
+  (~6–10 s in). Result: the marker was already past our snapshot offset
+  → 90 s timeout → false "lobby stuck" → kill working session → endless
+  reconnect loop on a perfectly-fine game.
+- 🛠 Fix: check the latest log file's creation time. If it was created
+  in the last 120 s it's THIS launch's log (Roblox starts a new file per
+  session), so scan from offset 0. Only snapshot-and-watch behaviour is
+  used when reusing a stale (pre-existing) log file.
+- 📝 Logs the chosen strategy at info level
+  (`tailing <path> from start (fresh session)` or
+  `from offset N (stale log)`) so future false positives are easy to
+  diagnose.
+
 ### v3.2.2
 *Lobby-stuck detection.*
 - ✨ **`WaitForGameJoin` post-launch check.** After `ReconnectToGame`
