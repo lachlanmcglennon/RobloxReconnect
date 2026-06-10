@@ -35,7 +35,7 @@ SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
 global APP_NAME       := "Roblox Auto-Reconnect V3.2.1"
-global APP_VERSION    := "3.2.3"
+global APP_VERSION    := "3.2.4"
 global APP_AUTHOR     := "INNIE (V3.2.1 hotfix: phantom-crash loop)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
@@ -1735,6 +1735,23 @@ ReconnectToGame(targetPid := 0) {
     LogTailPos := 0
     try {
         CloseRobloxInstance(targetPid)
+        ; V3.2.4 fix: clear stale bootstrapper / crash-handler zombies that
+        ; can silently swallow the roblox:// URI. If no RobloxPlayerBeta.exe
+        ; is running but RobloxPlayerLauncher.exe or RobloxCrashHandler.exe
+        ; is, they're left over from a failed prior launch and will block
+        ; the next URI fire until the OS cleans them up. Kill them.
+        if (!ProcessExist("RobloxPlayerBeta.exe")) {
+            for procName in ["RobloxPlayerLauncher.exe", "RobloxCrashHandler.exe"] {
+                stalePid := ProcessExist(procName)
+                if (stalePid) {
+                    Log("Killing stale " . procName . " (PID " . stalePid . ") before relaunch", "Info")
+                    try ProcessClose(stalePid)
+                    Sleep(300)
+                    if (ProcessExist(stalePid))
+                        try RunWait('taskkill /F /PID ' . stalePid, , "Hide")
+                }
+            }
+        }
         jitter := Cfg["JitterSec"] > 0 ? Random(0, Cfg["JitterSec"] * 1000) : 0
         Sleep(1000 + jitter)
         newPid := 0
@@ -1746,7 +1763,12 @@ ReconnectToGame(targetPid := 0) {
         ; and the old "ProcessExist(name)" check would declare instant
         ; false success in multi-instance setups).
         launched := false
-        Loop 30 {
+        ; V3.2.4: bumped 30->90 iterations. A cold Roblox bootstrap (with
+        ; update checks / patch download) can genuinely take 60-90s before
+        ; RobloxPlayerBeta.exe appears, and a too-short wait here would
+        ; declare the launch a failure and fire ANOTHER URI on top of the
+        ; in-flight bootstrap, multiplying the zombie problem.
+        Loop 90 {
             ; ShellExecute via roblox:// URI scheme returns no PID; fall
             ; back to "any RobloxPlayerBeta.exe spawned after our launch
             ; tick" detection in that case.

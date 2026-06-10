@@ -188,6 +188,26 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.4
+*Hotfix: silent URI swallowing by zombie bootstrapper.*
+- 🐛 When `RobloxPlayerLauncher.exe` or `RobloxCrashHandler.exe` is left
+  running from a failed prior launch attempt, firing `roblox://` again
+  does nothing — the OS hands the URI to the existing handler which
+  silently discards it. Symptom: script repeatedly logs
+  "Roblox launched, waiting for load..." followed by "did not stay
+  running after launch (60s timeout)" without ever bringing a player
+  process up, until the user manually clicks reconnect (which has the
+  same effect because the zombie has finally been GC'd by then).
+- 🛠 `ReconnectToGame` now kills any stale `RobloxPlayerLauncher.exe` and
+  `RobloxCrashHandler.exe` before each launch, but only when
+  `RobloxPlayerBeta.exe` itself is NOT running (so we never disturb a
+  healthy in-flight bootstrap).
+- 🛠 Bumped the post-launch process-appearance window from 30 s to 90 s.
+  A cold bootstrap with update check / patch download genuinely takes
+  60-90 s; the old 30 s window was guaranteed to false-fail in that
+  case and fire a fresh URI on top of the in-flight bootstrapper,
+  multiplying the zombie problem.
+
 ### v3.2.3
 *Critical hotfix: v3.2.2 WaitForGameJoin false-positive timeout.*
 - 🐛 **CRITICAL** `WaitForGameJoin` always snapshotted the log file's
