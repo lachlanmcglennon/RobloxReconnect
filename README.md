@@ -188,6 +188,27 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.2
+*Lobby-stuck detection.*
+- ✨ **`WaitForGameJoin` post-launch check.** After `ReconnectToGame`
+  confirms `RobloxPlayerBeta.exe` is stably running, it now tails the
+  latest Roblox log in `%LOCALAPPDATA%\Roblox\logs` for up to 90 s
+  looking for `[DFLog::NetworkClient] Connection accepted from <ip>`
+  (also accepts `DataModelLoadingPhase::OnAfterLoadingComplete` and
+  `joinGamePostStandard finished`). This is the unambiguous marker that
+  the client actually joined a game server rather than sitting on the
+  Roblox home / main page after a failed deep-link.
+- 🐛 On timeout, the lobby instance is closed via `CloseRobloxInstance(0)`
+  and the next `MonitorTick` triggers a fresh reconnect with the proper
+  retry/backoff flow.
+- 🛡 **Fail-open** on missing log directory (Microsoft Store / Bloxstrap
+  installs etc.) — logs a Warn and assumes success so we don't kill
+  working sessions just because the FLog path differs.
+- 🛡 Snapshots the log file length before waiting and only scans **new**
+  content, so a stale `Connection accepted` line from a previous session
+  in the same rotated log file can't produce a false positive. Mid-wait
+  log rotation is handled by re-resolving `GetLatestRobloxLog()`.
+
 ### v3.2.1
 *Hotfix: phantom-crash loop. Anyone running V3.2.0 should upgrade immediately.*
 - 🐛 **CRITICAL** Fixed a false-positive reconnect loop that fired every

@@ -35,7 +35,7 @@ SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
 global APP_NAME       := "Roblox Auto-Reconnect V3.2.1"
-global APP_VERSION    := "3.2.1"
+global APP_VERSION    := "3.2.2"
 global APP_AUTHOR     := "INNIE (V3.2.1 hotfix: phantom-crash loop)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
@@ -546,38 +546,70 @@ Log("Data folder: " . DATA_DIR, "Debug")
 
 ; V3.2.1: heartbeat so we can prove the script is alive between events.
 global HeartbeatCount := 0
-SetTimer(() => (HeartbeatCount += 1, Log("Heartbeat #" . HeartbeatCount
-    . " | monitoring=" . (IsMonitoringActive ? "ON" : "off")
-    . " | reconnectInProgress=" . (ReconnectInProgress ? "yes" : "no")
-    . " | roblox=" . (ProcessExist("RobloxPlayerBeta.exe") ? "running" : "missing"),
-    "Info")), 300000)  ; every 5 minutes
+SetTimer(HeartbeatTick, 300000)  ; every 5 minutes
+
+HeartbeatTick() {
+    global HeartbeatCount, IsMonitoringActive, ReconnectInProgress
+    HeartbeatCount += 1
+    try {
+        msg := "Heartbeat #" . HeartbeatCount
+            . " | monitoring=" . (IsMonitoringActive ? "ON" : "off")
+            . " | reconnectInProgress=" . (ReconnectInProgress ? "yes" : "no")
+            . " | roblox=" . (ProcessExist("RobloxPlayerBeta.exe") ? "running" : "missing")
+        Log(msg, "Info")
+    } catch Error as e {
+        ; never let the heartbeat itself crash the script
+    }
+}
 
 ; V3.2.1: log why we exit (clean shutdown vs crash vs user close).
-OnExit((reason, code) => Log("=== " . APP_NAME . " exiting (reason=" . reason
-    . ", code=" . code . ") ===", "Warn"))
+OnExit(OnAppExit)
+OnAppExit(reason, code) {
+    try Log("=== " . APP_NAME . " exiting (reason=" . reason . ", code=" . code . ") ===", "Warn")
+}
 
 ; V3.2.1: re-arm timers when Windows wakes from sleep. AHK timers can be
 ; stranded in a not-firing state across suspend/resume.
-OnMessage(0x218, (wParam, *) => (wParam = 0x12  ; PBT_APMRESUMEAUTOMATIC
-    ? (Log("System resumed from sleep - re-arming timers", "Info"),
-       (IsMonitoringActive && CheckTimer ? SetTimer(CheckTimer, Max(1, Cfg["CheckIntervalSec"]) * 1000) : 0),
-       (IsMonitoringActive && Cfg["DetectViaLog"] ? StartLogTail() : 0))
-    : 0))
+OnMessage(0x218, OnPowerBroadcast)
+OnPowerBroadcast(wParam, lParam, msg, hwnd) {
+    global IsMonitoringActive, CheckTimer, Cfg
+    if (wParam != 0x12)  ; PBT_APMRESUMEAUTOMATIC
+        return
+    try {
+        Log("System resumed from sleep - re-arming timers", "Info")
+        if (IsMonitoringActive && CheckTimer)
+            SetTimer(CheckTimer, Max(1, Cfg["CheckIntervalSec"]) * 1000)
+        if (IsMonitoringActive && Cfg["DetectViaLog"])
+            StartLogTail()
+    } catch Error as e {
+        ;
+    }
+}
 
 ; V3.2.1: stuck-state watchdog. If ReconnectInProgress is true for >5
 ; minutes without clearing, we hit an exception path that swallowed the
 ; cleanup. Force-clear so monitoring isn't permanently wedged.
 global ReconnectInProgressSince := 0
-SetTimer(() => (
-    ReconnectInProgress && ReconnectInProgressSince = 0
-        ? (ReconnectInProgressSince := A_TickCount)
-    : !ReconnectInProgress && ReconnectInProgressSince != 0
-        ? (ReconnectInProgressSince := 0)
-    : ReconnectInProgress && (A_TickCount - ReconnectInProgressSince) > 300000
-        ? (Log("Watchdog: ReconnectInProgress stuck >5min - force-clearing", "Warn"),
-           ReconnectInProgress := false, ReconnectInProgressSince := 0)
-    : 0
-), 60000)
+SetTimer(StuckStateWatchdog, 60000)
+
+StuckStateWatchdog() {
+    global ReconnectInProgress, ReconnectInProgressSince
+    try {
+        if (ReconnectInProgress) {
+            if (ReconnectInProgressSince = 0) {
+                ReconnectInProgressSince := A_TickCount
+            } else if ((A_TickCount - ReconnectInProgressSince) > 300000) {
+                Log("Watchdog: ReconnectInProgress stuck >5min - force-clearing", "Warn")
+                ReconnectInProgress := false
+                ReconnectInProgressSince := 0
+            }
+        } else if (ReconnectInProgressSince != 0) {
+            ReconnectInProgressSince := 0
+        }
+    } catch Error as e {
+        ;
+    }
+}
 
 ; Apply scheduling
 ApplyStopAtTimer()
@@ -1768,6 +1800,22 @@ ReconnectToGame(targetPid := 0) {
                 LastReconnectReason := ""
                 return
             }
+            ; V3.2.1: process is running and stable, but it might be stuck
+            ; on the main lobby/home page instead of having joined the
+            ; target server. Tail the Roblox log for "Connection accepted
+            ; from" to confirm the player is actually in a game.
+            Log("Roblox process up - waiting for game-server join confirmation...", "Info")
+            if (!WaitForGameJoin(90)) {
+                FailedReconnects += 1
+                Log("Roblox launched but did not join a game (lobby/home page) - retrying", "Warn")
+                Notify("error", APP_NAME, "Roblox stuck on home page - retrying")
+                ; Tear down the lobby session so the next reconnect launches fresh.
+                try CloseRobloxInstance(0)
+                IsAntiAfkPaused := false
+                ReconnectInProgress := false
+                LastReconnectReason := "lobby stuck"
+                return
+            }
             LifetimeReconnects += 1
             SuccessfulReconnects += 1
             ReconnectAttempts := 0  ; B6: backoff is per-incident, not lifetime
@@ -2924,6 +2972,77 @@ GetLatestRobloxLog() {
         }
     }
     return newest
+}
+
+; V3.2.1: verify Roblox actually joined a game server (not just stuck on
+; the main lobby/home screen). Tails the latest Roblox log for
+; "Connection accepted from" which is emitted within ~3s of a successful
+; server join and is NEVER present for a client sitting on the home page.
+;
+; Returns true if marker seen within timeoutSec, false otherwise.
+; Caller is responsible for the close/reconnect on false.
+WaitForGameJoin(timeoutSec := 90) {
+    local logPath := GetLatestRobloxLog()
+    if (logPath = "") {
+        Log("WaitForGameJoin: no Roblox log dir - cannot verify join, assuming OK", "Warn")
+        return true  ; fail-open: don't kill a working session over a missing log
+    }
+    ; Snapshot the file's current size; we only scan new content written
+    ; AFTER our launch, so we don't false-positive on a previous session's
+    ; "Connection accepted" line that's still in the same rotated log.
+    local startPos := 0
+    try {
+        local fInit := FileOpen(logPath, "r")
+        if (fInit) {
+            startPos := fInit.Length
+            fInit.Close()
+        }
+    } catch Error as e {
+        Log("WaitForGameJoin: could not snapshot log size: " . e.Message, "Warn")
+        return true
+    }
+    local deadline := A_TickCount + (timeoutSec * 1000)
+    local currentLog := logPath
+    local pos := startPos
+    Loop {
+        if (A_TickCount > deadline) {
+            Log("WaitForGameJoin: timeout after " . timeoutSec . "s without 'Connection accepted'", "Warn")
+            return false
+        }
+        Sleep(2000)
+        ; Roblox may have rotated the log (new session = new file).
+        local latest := GetLatestRobloxLog()
+        if (latest != currentLog) {
+            currentLog := latest
+            pos := 0  ; new file - read from start
+        }
+        local f := ""
+        try {
+            f := FileOpen(currentLog, "r")
+        } catch Error as e {
+            continue  ; file may be locked momentarily
+        }
+        if (!f)
+            continue
+        local total := f.Length
+        if (total <= pos) {
+            f.Close()
+            continue
+        }
+        try f.Pos := pos
+        local chunk := ""
+        try chunk := f.Read(total - pos)
+        catch Error as e
+            chunk := ""
+        pos := total
+        f.Close()
+        if (InStr(chunk, "Connection accepted from")
+            || InStr(chunk, "DataModelLoadingPhase::OnAfterLoadingComplete")
+            || InStr(chunk, "joinGamePostStandard finished")) {
+            Log("WaitForGameJoin: server join confirmed", "Info")
+            return true
+        }
+    }
 }
 
 StartLogTail() {
