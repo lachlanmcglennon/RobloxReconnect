@@ -188,6 +188,42 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.1
+*Hotfix: phantom-crash loop. Anyone running V3.2.0 should upgrade immediately.*
+- 🐛 **CRITICAL** Fixed a false-positive reconnect loop that fired every
+  `CheckIntervalSec` (could be ~100 reconnects/minute on a 1-second
+  interval). Root cause: `ReconnectToGame` declared "Joined successfully"
+  after a blind `Sleep(8000)` without verifying `RobloxPlayerBeta.exe`
+  was actually running — but the `roblox://` URI bootstrap can take
+  15–30 s. The next `MonitorTick` would then see the process still
+  bootstrapping, count a phantom crash, and reconnect again. On a
+  browser-launched VIP link this spawned a new browser window per cycle
+  (observed: 100 open browser windows after a short outage).
+- 🐛 `MonitorTick` now applies the same post-launch grace
+  (`HangGraceSec + 60 s`) to **process-exit** detection that V3.2.0 already
+  applied to hung-window detection. No more phantom crashes during
+  bootstrap.
+- 🐛 `ReconnectToGame` now polls `ProcessExist("RobloxPlayerBeta.exe")`
+  for 3 consecutive stable checks (2 s apart, up to 60 s total) before
+  declaring success. A bootstrap that exits without spawning the player
+  is now correctly reported as a failed reconnect.
+- ✨ **Heartbeat log** every 5 minutes (`Heartbeat #N | monitoring=… |
+  roblox=…`). Lets you tell at a glance whether the script is alive.
+- ✨ **OnExit hook** logs *why* AHK shut down (clean exit / Ctrl+C /
+  logoff / shutdown / error), so you can tell whether a missed
+  reconnect was because the script died vs. detection failed.
+- ✨ **System-resume handler** (`WM_POWERBROADCAST`) re-arms `CheckTimer`
+  and `LogTailTimer` after the laptop wakes from sleep. AHK timers can be
+  stranded in a "set but never firing" state across suspend/resume.
+- ✨ **Stuck-state watchdog** force-clears `ReconnectInProgress` if it
+  stays true for >5 min (belt-and-braces against exception paths that
+  swallowed the cleanup).
+
+**If you're upgrading from V3.2.0 and your stats look wildly inflated
+(e.g. hundreds of reconnects when you expected single digits), open the
+Stats tab and click **Reset lifetime stats** — the old counts include
+the phantom reconnects.**
+
 ### v3.2.0
 *Tag: `v3.2.0` — first GitHub-tagged release.*
 - ✨ **Smart disconnect detection** (Monitor tab → Disconnect Detection group):

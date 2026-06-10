@@ -34,9 +34,9 @@ Persistent()
 SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
-global APP_NAME       := "Roblox Auto-Reconnect V3.2"
-global APP_VERSION    := "3.2.0"
-global APP_AUTHOR     := "INNIE (V3.2 Resilience Pack)"
+global APP_NAME       := "Roblox Auto-Reconnect V3.2.1"
+global APP_VERSION    := "3.2.1"
+global APP_AUTHOR     := "INNIE (V3.2.1 hotfix: phantom-crash loop)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
 global CONFIG_FILE    := DATA_DIR . "\config.ini"
@@ -543,6 +543,41 @@ if (Cfg["StartMinimized"] && Cfg["MinimizeToTray"]) {
 
 Log("=== " . APP_NAME . " started ===", "Info")
 Log("Data folder: " . DATA_DIR, "Debug")
+
+; V3.2.1: heartbeat so we can prove the script is alive between events.
+global HeartbeatCount := 0
+SetTimer(() => (HeartbeatCount += 1, Log("Heartbeat #" . HeartbeatCount
+    . " | monitoring=" . (IsMonitoringActive ? "ON" : "off")
+    . " | reconnectInProgress=" . (ReconnectInProgress ? "yes" : "no")
+    . " | roblox=" . (ProcessExist("RobloxPlayerBeta.exe") ? "running" : "missing"),
+    "Info")), 300000)  ; every 5 minutes
+
+; V3.2.1: log why we exit (clean shutdown vs crash vs user close).
+OnExit((reason, code) => Log("=== " . APP_NAME . " exiting (reason=" . reason
+    . ", code=" . code . ") ===", "Warn"))
+
+; V3.2.1: re-arm timers when Windows wakes from sleep. AHK timers can be
+; stranded in a not-firing state across suspend/resume.
+OnMessage(0x218, (wParam, *) => (wParam = 0x12  ; PBT_APMRESUMEAUTOMATIC
+    ? (Log("System resumed from sleep - re-arming timers", "Info"),
+       (IsMonitoringActive && CheckTimer ? SetTimer(CheckTimer, Max(1, Cfg["CheckIntervalSec"]) * 1000) : 0),
+       (IsMonitoringActive && Cfg["DetectViaLog"] ? StartLogTail() : 0))
+    : 0))
+
+; V3.2.1: stuck-state watchdog. If ReconnectInProgress is true for >5
+; minutes without clearing, we hit an exception path that swallowed the
+; cleanup. Force-clear so monitoring isn't permanently wedged.
+global ReconnectInProgressSince := 0
+SetTimer(() => (
+    ReconnectInProgress && ReconnectInProgressSince = 0
+        ? (ReconnectInProgressSince := A_TickCount)
+    : !ReconnectInProgress && ReconnectInProgressSince != 0
+        ? (ReconnectInProgressSince := 0)
+    : ReconnectInProgress && (A_TickCount - ReconnectInProgressSince) > 300000
+        ? (Log("Watchdog: ReconnectInProgress stuck >5min - force-clearing", "Warn"),
+           ReconnectInProgress := false, ReconnectInProgressSince := 0)
+    : 0
+), 60000)
 
 ; Apply scheduling
 ApplyStopAtTimer()
@@ -1477,6 +1512,20 @@ MonitorTick() {
         return
     try {
         if (!ProcessExist("RobloxPlayerBeta.exe")) {
+            ; V3.2.1 fix: apply post-launch grace to process-exit detection
+            ; too. The Roblox URI bootstrap takes 15-30s to spawn
+            ; RobloxPlayerBeta.exe; without this grace, MonitorTick fires
+            ; right after ReconnectToGame returns, sees the process is
+            ; still bootstrapping, declares a phantom crash, and enters
+            ; an infinite false-reconnect loop (root cause of 387/387
+            ; bogus stats observed in V3.2.0).
+            postLaunchGraceMs := (Max(0, Cfg["HangGraceSec"]) + 60) * 1000
+            inPostLaunchGrace := (LastLaunchTickCount > 0
+                && (A_TickCount - LastLaunchTickCount) < postLaunchGraceMs)
+            if (inPostLaunchGrace) {
+                Log("Roblox not yet present but within post-launch grace - waiting", "Debug")
+                return
+            }
             LifetimeCrashes += 1
             SaveStats()
             Log("Roblox not running - triggering reconnect", "Warn")
@@ -1688,7 +1737,37 @@ ReconnectToGame(targetPid := 0) {
         }
         if (launched) {
             Log("Roblox launched, waiting for load...", "Info")
-            Sleep(8000)
+            ; V3.2.1 fix: don't blindly Sleep(8000) - actually verify
+            ; RobloxPlayerBeta.exe is stably running before declaring
+            ; success. Require ProcessExist=true for 3 consecutive checks
+            ; ~2s apart (~6s minimum), up to 60s total. This eliminates
+            ; the false-positive "Joined successfully" followed instantly
+            ; by "Roblox not running" cycle observed in V3.2.0 (387/387
+            ; bogus stats).
+            stableCount := 0
+            stableNeeded := 3
+            launchOk := false
+            Loop 30 {
+                if (ProcessExist("RobloxPlayerBeta.exe")) {
+                    stableCount += 1
+                    if (stableCount >= stableNeeded) {
+                        launchOk := true
+                        break
+                    }
+                } else {
+                    stableCount := 0
+                }
+                Sleep(2000)
+            }
+            if (!launchOk) {
+                FailedReconnects += 1
+                Log("Roblox did not stay running after launch (60s timeout)", "Error")
+                Notify("error", APP_NAME, "Roblox did not stay running after launch")
+                IsAntiAfkPaused := false
+                ReconnectInProgress := false
+                LastReconnectReason := ""
+                return
+            }
             LifetimeReconnects += 1
             SuccessfulReconnects += 1
             ReconnectAttempts := 0  ; B6: backoff is per-incident, not lifetime
