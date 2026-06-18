@@ -34,9 +34,9 @@ Persistent()
 SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
-global APP_NAME       := "Roblox Auto-Reconnect V3.2.7"
-global APP_VERSION    := "3.2.7"
-global APP_AUTHOR     := "INNIE (V3.2.7: 60s teleport debounce on log-detected disconnects)"
+global APP_NAME       := "Roblox Auto-Reconnect V3.2.8"
+global APP_VERSION    := "3.2.8"
+global APP_AUTHOR     := "INNIE (V3.2.8: hotfix stray brace from V3.2.7 debounce)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
 global CONFIG_FILE    := DATA_DIR . "\config.ini"
@@ -3331,7 +3331,6 @@ LogTailTick() {
     } catch Error as e {
         Log("LogTailTick error: " . e.Message, "Debug")
     }
-}
 }
 
 ; Returns a short reason string if the supplied log chunk contains a

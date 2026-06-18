@@ -188,6 +188,15 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.8
+*Hotfix: removes stray top-level `}` introduced by V3.2.7.*
+- 🐛 V3.2.7 added an extra closing brace at top level (after
+  `LogTailTick`'s closing brace) during the debounce-feature edit.
+  AHK's `/validate` passed but the actual runtime threw
+  `Unexpected "}"` on startup, preventing the script from loading.
+- ✅ No behaviour change vs V3.2.7 — teleport-debounce feature intact
+  and now actually runs.
+
 ### v3.2.7
 *60-second teleport debounce on log-detected disconnects.*
 - 🐛 Roblox emits `Disconnected from server` (with reason code 285)
