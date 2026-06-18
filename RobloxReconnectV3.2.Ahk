@@ -34,9 +34,9 @@ Persistent()
 SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
-global APP_NAME       := "Roblox Auto-Reconnect V3.2.5"
-global APP_VERSION    := "3.2.5"
-global APP_AUTHOR     := "INNIE (V3.2.5: defer reconnects during Roblox update)"
+global APP_NAME       := "Roblox Auto-Reconnect V3.2.6"
+global APP_VERSION    := "3.2.6"
+global APP_AUTHOR     := "INNIE (V3.2.6: audit hotfix for update-detection gate)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
 global CONFIG_FILE    := DATA_DIR . "\config.ini"
@@ -1558,6 +1558,17 @@ MonitorTick() {
                 Log("Roblox not yet present but within post-launch grace - waiting", "Debug")
                 return
             }
+            ; V3.2.6 fix #1: don't accrue phantom LifetimeCrashes during a
+            ; Roblox auto-update. RobloxPlayerBeta.exe is absent for the
+            ; entire install (minutes), so MonitorTick was bumping the
+            ; counter + persisting stats.ini every tick (~60+ phantom
+            ; crashes per update). Gate the bookkeeping behind the same
+            ; update check TriggerReconnect uses.
+            if (IsRobloxUpdating()) {
+                HangFirstSeenAt := 0
+                TriggerReconnect("process exit")  ; gated inside, will throttle log
+                return
+            }
             LifetimeCrashes += 1
             SaveStats()
             Log("Roblox not running - triggering reconnect", "Warn")
@@ -1575,6 +1586,20 @@ MonitorTick() {
             if (InStr(txt, "disconnect") || InStr(txt, "Disconnect")
                 || InStr(txt, "lost connection") || InStr(txt, "error code")
                 || InStr(txt, "Reconnect")) {
+                ; V3.2.6 fix #2: if Roblox is updating, do NOT close the
+                ; disconnect dialog yet. The previous flow closed the
+                ; dialog before calling TriggerReconnect, then the gate
+                ; deferred — leaving no signal for the next tick to
+                ; re-detect. Leave the dialog visible so we re-fire here
+                ; once the update finishes.
+                if (IsRobloxUpdating()) {
+                    static lastDlgDeferLog := 0
+                    if (A_TickCount - lastDlgDeferLog > 60000) {
+                        Log("Error dialog seen but Roblox is updating - leaving dialog for retry", "Info")
+                        lastDlgDeferLog := A_TickCount
+                    }
+                    return
+                }
                 Log("Error dialog detected - triggering reconnect", "Warn")
                 pid := 0
                 try pid := WinGetPID("ahk_class #32770 ahk_exe RobloxPlayerBeta.exe")
@@ -1651,8 +1676,14 @@ TriggerReconnect(reason, pid := 0) {
     ; V3.2.5: defer if a Roblox update is in progress. The bootstrap can
     ; take minutes; we must not fire roblox:// URIs on top of it or kill
     ; its launcher (avoids the 57x cascade observed during 0.725->0.726).
+    ; V3.2.6 fix #4: throttle the deferral log so a multi-minute install
+    ; doesn't write ~60 identical Info lines.
     if (IsRobloxUpdating()) {
-        Log("Roblox update in progress - deferring reconnect (no attempt consumed)", "Info")
+        static lastUpdateDeferLog := 0
+        if (A_TickCount - lastUpdateDeferLog > 60000) {
+            Log("Roblox update in progress - deferring reconnect (no attempt consumed)", "Info")
+            lastUpdateDeferLog := A_TickCount
+        }
         try StatusBar.SetText("Roblox updating - waiting...")
         return
     }
@@ -1696,6 +1727,16 @@ ReconnectToGame(targetPid := 0) {
     global SuccessfulReconnects, FailedReconnects, LogTailFile, LogTailPos
     global ReconnectInProgress, HangFirstSeenAt, LastLaunchTickCount, ReconnectAttempts
     global LastLaunchPid, LastReconnectReason, DeferredReconnectTimer, IsMonitoringActive
+    ; V3.2.6 fix #3: gate the manual-reconnect / scheduled-rejoin path
+    ; too. ManualReconnect() bypasses TriggerReconnect, so without this
+    ; check a user hotkey-press during an update could fire roblox:// on
+    ; top of the active installer — exactly the cascade we're avoiding.
+    if (IsRobloxUpdating()) {
+        Log("Reconnect requested but Roblox is updating - skipping launch", "Warn")
+        try StatusBar.SetText("Roblox updating - waiting...")
+        try Notify("info", APP_NAME, "Roblox is updating; reconnect skipped.")
+        return
+    }
     if (Cfg["RotateProfiles"] && Profiles.Length > 1) {
         ActiveProfileIdx := Mod(ActiveProfileIdx, Profiles.Length) + 1
         try RefreshProfileDropDown()
@@ -3017,8 +3058,6 @@ GetLatestRobloxLog() {
 ; cold-aged once an install completes.
 IsRobloxUpdating() {
     if (ProcessExist("RobloxPlayerInstaller.exe"))
-        return true
-    if (ProcessExist("RobloxPlayerLauncherBeta.exe"))  ; some channels
         return true
     local logDir := EnvGet("LOCALAPPDATA") . "\Roblox\logs"
     if (!DirExist(logDir))

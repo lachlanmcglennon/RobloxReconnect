@@ -188,6 +188,28 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.6
+*Audit hotfix: tighten the V3.2.5 update-detection gate.*
+Three reviewers caught four real gaps in V3.2.5; this release closes
+them.
+- 🐛 **Phantom LifetimeCrashes during updates.** MonitorTick incremented
+  the crash counter and re-wrote stats.ini before the V3.2.5 deferral
+  ran, so a 5-minute Roblox update polluted lifetime stats with ~60
+  phantom crashes. Now gated.
+- 🐛 **Disconnect-dialog signal lost during updates.** The error-dialog
+  branch closed the dialog before deferring, leaving no trigger for the
+  next tick to retry once the update finished. Now the dialog is left
+  on-screen while updating and reused next tick.
+- 🐛 **Manual-reconnect hotkey bypassed the gate.** Pressing the
+  reconnect hotkey during an active install would still fire
+  `roblox://` on top of the updater. `ReconnectToGame` now self-gates;
+  a toast notifies the user the request was skipped.
+- 🐛 **Deferral log spam.** "Roblox update in progress - deferring
+  reconnect" was emitted on every 5 s monitor tick. Now throttled to
+  once per 60 s (same throttle on the new dialog-deferral log).
+- 🧹 Removed dead `ProcessExist("RobloxPlayerLauncherBeta.exe")` check
+  from `IsRobloxUpdating()` — no such Roblox binary exists.
+
 ### v3.2.5
 *Defer reconnects while Roblox is updating itself.*
 - 🐛 Discovered cascade: a forced Roblox client update (0.725 → 0.726)
