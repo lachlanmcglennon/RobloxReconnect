@@ -188,6 +188,31 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.7
+*60-second teleport debounce on log-detected disconnects.*
+- 🐛 Roblox emits `Disconnected from server` (with reason code 285)
+  during legitimate in-game teleports — `TeleportService`, place-jumps,
+  server hops. V3.2.6 and earlier fired an immediate reconnect on the
+  first sighting, yanking the player out of a perfectly healthy
+  teleport mid-flight. Observed live on bambPserver at 12:40:28 today
+  (full reconnect cycle for what was just a normal server hop).
+- ✨ **Pending-disconnect debounce.** When a disconnect log signal is
+  detected, the script now holds it as "pending" for 60 s and confirms
+  one of three outcomes:
+  1. **Server re-join observed** (`Connection accepted from` in the log
+     chunks) — teleport completed, clear pending, no reconnect fired.
+  2. **Hold expires with no re-join** — real disconnect, reconnect
+     fires with the original reason preserved (`log:<reason>`).
+  3. **Roblox process dies during the hold** — clear pending; the
+     process-exit branch in MonitorTick handles the relaunch directly
+     (no duplicate trigger).
+- 🛡 Pending state is also cleared on log-file rotation (fresh Roblox
+  session) and at the entry of `TriggerReconnect` (any other path that
+  reconnects supersedes the debounce).
+- ⚠ Process-exit detection (the script's primary signal) is **not**
+  debounced — when Roblox truly closes, MonitorTick still reacts
+  promptly via the existing post-launch grace logic.
+
 ### v3.2.6
 *Audit hotfix: tighten the V3.2.5 update-detection gate.*
 Three reviewers caught four real gaps in V3.2.5; this release closes

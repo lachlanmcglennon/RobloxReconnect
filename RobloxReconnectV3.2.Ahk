@@ -34,9 +34,9 @@ Persistent()
 SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
-global APP_NAME       := "Roblox Auto-Reconnect V3.2.6"
-global APP_VERSION    := "3.2.6"
-global APP_AUTHOR     := "INNIE (V3.2.6: audit hotfix for update-detection gate)"
+global APP_NAME       := "Roblox Auto-Reconnect V3.2.7"
+global APP_VERSION    := "3.2.7"
+global APP_AUTHOR     := "INNIE (V3.2.7: 60s teleport debounce on log-detected disconnects)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
 global CONFIG_FILE    := DATA_DIR . "\config.ini"
@@ -65,6 +65,16 @@ global CheckTimer         := ""
 global LogTailTimer       := ""
 global LogTailFile        := ""    ; full path of currently-tailed Roblox log
 global LogTailPos         := 0     ; byte offset already consumed
+; V3.2.7: debounce log-detected disconnects. Many in-game teleports
+; (TeleportService, place-jump, server hop) emit "Disconnected from
+; server" while the Roblox process happily migrates to a new instance.
+; Instead of firing reconnect on the first sighting, hold the suspect
+; for HoldSec seconds and confirm by either (a) seeing "Connection
+; accepted from" in subsequent log chunks (teleport completed -> clear)
+; or (b) timing out without a re-join (real disconnect -> reconnect).
+global PendingDisconnectAt     := 0   ; A_TickCount when first seen, 0 = none
+global PendingDisconnectReason := ""
+global PENDING_DISCONNECT_HOLD_MS := 60000  ; 60s confirmation window
 global HangFirstSeenAt    := 0     ; A_TickCount when first hang was observed (0 = none)
 global LastLaunchTickCount:= 0     ; A_TickCount of last Run(target); used for post-launch hang grace
 global LastLaunchPid      := 0     ; PID of the most recent Run(target); used by ReconnectToGame success check
@@ -1673,6 +1683,13 @@ MonitorTick() {
 
 TriggerReconnect(reason, pid := 0) {
     global LastReconnectTime, ReconnectAttempts, Cfg, LastReconnectReason
+    global PendingDisconnectAt, PendingDisconnectReason
+    ; V3.2.7: any path that actually triggers a reconnect supersedes the
+    ; log-debounce - clear it so we don't double-fire after the launch.
+    if (PendingDisconnectAt > 0) {
+        PendingDisconnectAt := 0
+        PendingDisconnectReason := ""
+    }
     ; V3.2.5: defer if a Roblox update is in progress. The bootstrap can
     ; take minutes; we must not fire roblox:// URIs on top of it or kill
     ; its launcher (avoids the 57x cascade observed during 0.725->0.726).
@@ -3197,8 +3214,29 @@ OnDetectionToggle() {
 ; disconnect-related patterns. If detected, triggers a reconnect.
 LogTailTick() {
     global IsMonitoringActive, LogTailFile, LogTailPos, Cfg, ReconnectInProgress
+    global PendingDisconnectAt, PendingDisconnectReason, PENDING_DISCONNECT_HOLD_MS
     if (!IsMonitoringActive || !Cfg["DetectViaLog"] || ReconnectInProgress)
         return
+    ; V3.2.7: confirm-or-clear any pending log-detected disconnect first.
+    ; (a) If the Roblox process is gone, don't wait the full hold - that's
+    ;     a real crash; let MonitorTick's process-exit branch handle it
+    ;     and just clear the pending state to avoid a duplicate trigger.
+    ; (b) Otherwise, if the hold has expired with no re-join evidence
+    ;     observed (we'd have cleared it below if so), fire the reconnect.
+    if (PendingDisconnectAt > 0) {
+        if (!ProcessExist("RobloxPlayerBeta.exe")) {
+            Log("Pending disconnect '" . PendingDisconnectReason . "' superseded by process-exit; clearing debounce", "Info")
+            PendingDisconnectAt := 0
+            PendingDisconnectReason := ""
+        } else if (A_TickCount - PendingDisconnectAt >= PENDING_DISCONNECT_HOLD_MS) {
+            local heldReason := PendingDisconnectReason
+            Log("Pending disconnect '" . heldReason . "' confirmed (no server re-join in " . (PENDING_DISCONNECT_HOLD_MS // 1000) . "s) - triggering reconnect", "Warn")
+            PendingDisconnectAt := 0
+            PendingDisconnectReason := ""
+            TriggerReconnect("log:" . heldReason)
+            return
+        }
+    }
     try {
         local latest := GetLatestRobloxLog()
         if (latest = "")
@@ -3227,6 +3265,14 @@ LogTailTick() {
             LogTailFile := latest
             LogTailPos := newPos
             Log("Tailing Roblox log: " . latest . " (start offset " . LogTailPos . ")", "Debug")
+            ; V3.2.7: a fresh log file = fresh Roblox session = any pending
+            ; disconnect from the prior session is moot. Clear it so the
+            ; new session starts with a clean slate.
+            if (PendingDisconnectAt > 0) {
+                Log("Pending disconnect '" . PendingDisconnectReason . "' cleared (new Roblox log file rotated in)", "Info")
+                PendingDisconnectAt := 0
+                PendingDisconnectReason := ""
+            }
             return
         }
         local f := ""
@@ -3260,14 +3306,32 @@ LogTailTick() {
         f.Close()
         if (chunk = "")
             return
+        ; V3.2.7: process re-join evidence BEFORE new disconnect signals.
+        ; If we're holding a pending disconnect and this chunk shows the
+        ; client successfully joined a new server (the standard marker
+        ; emitted within ~3s of any join, including post-teleport joins),
+        ; the original disconnect was transient - clear without acting.
+        if (PendingDisconnectAt > 0 && InStr(chunk, "Connection accepted from")) {
+            Log("Pending disconnect '" . PendingDisconnectReason . "' cleared (server re-join detected - likely in-game teleport)", "Info")
+            PendingDisconnectAt := 0
+            PendingDisconnectReason := ""
+        }
         local reason := DetectDisconnectInLog(chunk)
         if (reason != "") {
-            Log("Roblox log indicates disconnect: " . reason, "Warn")
-            TriggerReconnect("log:" . reason)
+            ; V3.2.7: debounce instead of firing immediately. Only set
+            ; pending on the FIRST sighting; further sightings during the
+            ; hold are noise (Roblox often emits the disconnect string
+            ; multiple times in a single transition).
+            if (PendingDisconnectAt = 0) {
+                PendingDisconnectAt := A_TickCount
+                PendingDisconnectReason := reason
+                Log("Roblox log indicates possible disconnect: " . reason . " - holding " . (PENDING_DISCONNECT_HOLD_MS // 1000) . "s to rule out in-game teleport", "Info")
+            }
         }
     } catch Error as e {
         Log("LogTailTick error: " . e.Message, "Debug")
     }
+}
 }
 
 ; Returns a short reason string if the supplied log chunk contains a
