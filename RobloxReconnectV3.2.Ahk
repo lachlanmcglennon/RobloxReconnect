@@ -34,9 +34,9 @@ Persistent()
 SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
-global APP_NAME       := "Roblox Auto-Reconnect V3.2.1"
-global APP_VERSION    := "3.2.4"
-global APP_AUTHOR     := "INNIE (V3.2.1 hotfix: phantom-crash loop)"
+global APP_NAME       := "Roblox Auto-Reconnect V3.2.5"
+global APP_VERSION    := "3.2.5"
+global APP_AUTHOR     := "INNIE (V3.2.5: defer reconnects during Roblox update)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
 global CONFIG_FILE    := DATA_DIR . "\config.ini"
@@ -1648,6 +1648,14 @@ MonitorTick() {
 
 TriggerReconnect(reason, pid := 0) {
     global LastReconnectTime, ReconnectAttempts, Cfg, LastReconnectReason
+    ; V3.2.5: defer if a Roblox update is in progress. The bootstrap can
+    ; take minutes; we must not fire roblox:// URIs on top of it or kill
+    ; its launcher (avoids the 57x cascade observed during 0.725->0.726).
+    if (IsRobloxUpdating()) {
+        Log("Roblox update in progress - deferring reconnect (no attempt consumed)", "Info")
+        try StatusBar.SetText("Roblox updating - waiting...")
+        return
+    }
     now := A_TickCount
     cooldownMs := Cfg["CooldownSec"] * 1000
     if (Cfg["BackoffEnabled"] && ReconnectAttempts > 0)
@@ -1740,7 +1748,9 @@ ReconnectToGame(targetPid := 0) {
         ; is running but RobloxPlayerLauncher.exe or RobloxCrashHandler.exe
         ; is, they're left over from a failed prior launch and will block
         ; the next URI fire until the OS cleans them up. Kill them.
-        if (!ProcessExist("RobloxPlayerBeta.exe")) {
+        ; V3.2.5: but NEVER kill them when Roblox is actively updating -
+        ; the launcher IS the update bootstrapper in that case.
+        if (!ProcessExist("RobloxPlayerBeta.exe") && !IsRobloxUpdating()) {
             for procName in ["RobloxPlayerLauncher.exe", "RobloxCrashHandler.exe"] {
                 stalePid := ProcessExist(procName)
                 if (stalePid) {
@@ -2994,6 +3004,34 @@ GetLatestRobloxLog() {
         }
     }
     return newest
+}
+
+; V3.2.5: detect a Roblox client update in progress so we can defer
+; reconnect attempts instead of cascading. Signals (any one is enough):
+;   1. RobloxPlayerInstaller.exe is running (the actual updater binary).
+;   2. A %LOCALAPPDATA%\Roblox\logs\RobloxPlayerInstaller_*.log was
+;      modified in the last 120 seconds (= active install just happened
+;      or is in flight).
+; Both signals avoid false-positives on a healthy run: the installer
+; only exists during version transitions; its log files are absent or
+; cold-aged once an install completes.
+IsRobloxUpdating() {
+    if (ProcessExist("RobloxPlayerInstaller.exe"))
+        return true
+    if (ProcessExist("RobloxPlayerLauncherBeta.exe"))  ; some channels
+        return true
+    local logDir := EnvGet("LOCALAPPDATA") . "\Roblox\logs"
+    if (!DirExist(logDir))
+        return false
+    Loop Files, logDir . "\RobloxPlayerInstaller_*.log" {
+        try {
+            if (DateDiff(A_Now, A_LoopFileTimeModified, "Seconds") < 120)
+                return true
+        } catch Error as e {
+            ;
+        }
+    }
+    return false
 }
 
 ; V3.2.1: verify Roblox actually joined a game server (not just stuck on

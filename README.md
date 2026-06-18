@@ -188,6 +188,26 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.5
+*Defer reconnects while Roblox is updating itself.*
+- 🐛 Discovered cascade: a forced Roblox client update (0.725 → 0.726)
+  could break the bootstrap for hours. Every `roblox://` URI invocation
+  briefly spawned a `RobloxPlayerBeta.exe` then died (installer aborting),
+  so the script saw "process appeared then exited" 57 times in 5 hours,
+  each one opening a fresh VIP browser tab (≈57 unclosed tabs by morning).
+- ✨ **`IsRobloxUpdating()` detector.** Returns true if
+  `RobloxPlayerInstaller.exe` is running OR a
+  `%LOCALAPPDATA%\Roblox\logs\RobloxPlayerInstaller_*.log` was modified
+  in the last 120 s. Both signals are absent during a healthy session.
+- 🛡 `TriggerReconnect` defers (logs `Roblox update in progress -
+  deferring reconnect (no attempt consumed)`) instead of firing the URI
+  / consuming an attempt / arming the cooldown when an update is live.
+  Repeats every monitor tick; resumes automatically once the installer
+  finishes.
+- 🛡 `ReconnectToGame`'s V3.2.4 zombie-launcher killer now skips when an
+  update is active — `RobloxPlayerLauncher.exe` IS the updater during a
+  patch and must not be killed.
+
 ### v3.2.4
 *Hotfix: silent URI swallowing by zombie bootstrapper.*
 - 🐛 When `RobloxPlayerLauncher.exe` or `RobloxCrashHandler.exe` is left
