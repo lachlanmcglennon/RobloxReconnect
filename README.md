@@ -188,6 +188,38 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.11
+*Multi-method launch ladder so reconnect doesn't give up at the first
+silent dispatch failure - tries 3-4 alternative ways to spawn Roblox
+before halting.*
+- 🆙 **Launch-method ladder.** When the default `Run(target)` path
+  fails to spawn `RobloxPlayerBeta.exe` within 60 s, the script now
+  falls through to:
+  1. `default-shell` — current `Run(target)` (unchanged)
+  2. `fresh-browser` — kill all `msedge/chrome/firefox/brave/opera`
+     processes first, then re-fire the URL into a clean browser
+     (the most common rescue for the 23 Jun cascade — tab pileup
+     was the proximate cause)
+  3. `url-shortcut-file` — write a `.url` shortcut to `%TEMP%` and
+     `ShellExecute` it (uses the exact same code path as a user
+     double-clicking a desktop shortcut, bypassing whatever browser
+     state was wedged)
+  4. `alt-browser:<name>` — if a *non-default* browser is installed
+     (Edge/Chrome/Firefox/Brave detected via registry + path scan),
+     launch the URL through that one directly
+- 🆙 **Circuit-breaker softened.** Now requires 4 *full-ladder*
+  failures (~16 min of trying) before auto-stopping, instead of 2
+  single-method failures (~3 min). The ladder itself is the primary
+  defence; the cap is just for truly unrecoverable cases.
+- ✅ Better logging: every method announces itself with
+  `Launch method N/M: 'fresh-browser' - kill all browser processes...`
+  and on success logs `RobloxPlayerBeta.exe spawned (PID X) after Ys
+  on method 'fresh-browser'` so you can see which method actually
+  worked.
+- ✅ Direct-URI launches (`roblox-player:` / `roblox://`) skip the
+  browser-tricks methods and only try `default-shell` +
+  `url-shortcut-file`.
+
 ### v3.2.10
 *Fix the false-positive "Roblox launched" log that allowed a 6-hour
 browser-tab cascade overnight, plus add launch-dispatch circuit-breaker

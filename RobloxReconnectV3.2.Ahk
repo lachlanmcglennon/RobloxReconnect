@@ -35,7 +35,7 @@ SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
 global APP_NAME       := "Roblox Auto-Reconnect V3.2.9"
-global APP_VERSION    := "3.2.10"
+global APP_VERSION    := "3.2.11"
 global APP_AUTHOR     := "INNIE (V3.2.9: universal server-disconnect patterns from real logs)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
@@ -1824,46 +1824,71 @@ ReconnectToGame(targetPid := 0) {
         }
         jitter := Cfg["JitterSec"] > 0 ? Random(0, Cfg["JitterSec"] * 1000) : 0
         Sleep(1000 + jitter)
-        newPid := 0
-        ; V3.2.10: snapshot Roblox-log dir state so we can detect whether
-        ; a new Player session log actually got created (proves Roblox
-        ; truly started, not just our Run() returned a browser PID).
+        ; V3.2.11: try a ladder of launch methods. Each method has a
+        ; 60s window to spawn RobloxPlayerBeta.exe. If a method fails,
+        ; fall through to the next. The 23 Jun cascade proved that
+        ; the default Run(target) path can silently fail under browser
+        ; pressure - we now have fallback paths that bypass it.
+        preExistingPid := ProcessExist("RobloxPlayerBeta.exe")  ; sibling we should ignore
         preLaunchLogs := GetPlayerLogSnapshot()
         launchKindHint := (InStr(target, "roblox-player:") || InStr(target, "roblox://")) ? "direct-URI" : "https-via-browser"
-        Log("Launch dispatch: kind=" . launchKindHint . " target=" . MaskVipForView(target), "Info")
-        Run(target, , , &newPid)
-        LastLaunchPid := newPid
-        LastLaunchTickCount := A_TickCount  ; B4: arm post-launch hang grace
-        if (newPid > 0) {
-            Log("Run() returned PID " . newPid . " (" . GetProcessNameForPid(newPid) . ") - NOT trusted as Roblox proof", "Info")
-        } else {
-            Log("Run() returned no PID (URI/protocol launch) - waiting for RobloxPlayerBeta.exe to appear", "Info")
-        }
-        ; V3.2.10 fix: ALWAYS wait for RobloxPlayerBeta.exe specifically.
-        ; The old code trusted newPid > 0 as proof, but for https VIP links
-        ; newPid is the BROWSER's PID - browser exists instantly even when
-        ; the protocol-handoff to Roblox silently fails. That caused the
-        ; 23 Jun 03:04->09:07 6-hour cascade: 71 reconnects logged as
-        ; "Roblox launched" but only 1 actually spawned Roblox.exe (the
-        ; rest piled up browser tabs while Roblox.com refused to fire the
-        ; protocol).
+        methodLadder := BuildLaunchMethodLadder(target, launchKindHint)
+        Log("Launch ladder: " . methodLadder.Length . " methods queued for target kind=" . launchKindHint, "Info")
         launched := false
-        preExistingPid := ProcessExist("RobloxPlayerBeta.exe")  ; sibling we should ignore
-        Loop 90 {
-            curPid := ProcessExist("RobloxPlayerBeta.exe")
-            if (curPid && curPid != preExistingPid) {
-                Log("RobloxPlayerBeta.exe spawned (PID " . curPid . ") after " . A_Index . "s wait", "Info")
+        successfulMethod := ""
+        newPid := 0
+        for methodIdx, method in methodLadder {
+            methodName := method["name"]
+            Log("Launch method " . methodIdx . "/" . methodLadder.Length . ": '" . methodName . "' - " . method["desc"], "Info")
+            ; Pre-method hook (e.g. close browsers, write shortcut file)
+            try {
+                if (method.Has("prepare"))
+                    method["prepare"].Call()
+            } catch Error as prepErr {
+                Log("Method '" . methodName . "' prepare step failed: " . prepErr.Message . " - skipping this method", "Warn")
+                continue
+            }
+            launchPid := 0
+            try {
+                launchPid := method["fire"].Call()
+            } catch Error as fireErr {
+                Log("Method '" . methodName . "' fire step failed: " . fireErr.Message . " - trying next method", "Warn")
+                continue
+            }
+            newPid := launchPid
+            LastLaunchPid := newPid
+            LastLaunchTickCount := A_TickCount
+            if (newPid > 0) {
+                Log("Method '" . methodName . "' fired - Run returned PID " . newPid . " (" . GetProcessNameForPid(newPid) . ") - NOT trusted as Roblox proof", "Info")
+            } else {
+                Log("Method '" . methodName . "' fired - no PID returned (URI/protocol)", "Info")
+            }
+            ; Wait up to 60s for a NEW RobloxPlayerBeta.exe PID to appear.
+            ; The 90s wait we used before is overkill per-method when we have
+            ; multiple methods to try; 60s per method, 4 methods worst-case = 4min.
+            methodLaunched := false
+            Loop 60 {
+                curPid := ProcessExist("RobloxPlayerBeta.exe")
+                if (curPid && curPid != preExistingPid) {
+                    Log("RobloxPlayerBeta.exe spawned (PID " . curPid . ") after " . A_Index . "s on method '" . methodName . "'", "Info")
+                    methodLaunched := true
+                    break
+                }
+                if (Mod(A_Index, 10) = 0) {
+                    browserState := (newPid > 0 && ProcessExist(newPid)) ? ("dispatcher PID " . newPid . " alive") : "dispatcher PID gone"
+                    Log("Method '" . methodName . "' waiting... " . A_Index . "s/60s (" . browserState . ")", "Info")
+                }
+                Sleep(1000)
+            }
+            if (methodLaunched) {
                 launched := true
+                successfulMethod := methodName
                 break
             }
-            if (Mod(A_Index, 10) = 0) {
-                browserState := (newPid > 0 && ProcessExist(newPid)) ? ("browser PID " . newPid . " alive") : "browser PID gone"
-                Log("Waiting for Roblox process... " . A_Index . "s/90s (" . browserState . ", no RobloxPlayerBeta.exe yet)", "Info")
-            }
-            Sleep(1000)
+            Log("Method '" . methodName . "' did NOT spawn Roblox in 60s - falling through to next method", "Warn")
         }
         if (launched) {
-            Log("Roblox launched, waiting for load...", "Info")
+            Log("Roblox launched via method '" . successfulMethod . "', waiting for load...", "Info")
             ; V3.2.1 fix: don't blindly Sleep(8000) - actually verify
             ; RobloxPlayerBeta.exe is stably running before declaring
             ; success. Require ProcessExist=true for 3 consecutive checks
@@ -1927,23 +1952,28 @@ ReconnectToGame(targetPid := 0) {
             CheckLifetimeStopCap()
             return
         }
-        ; V3.2.10: 90s elapsed with no new RobloxPlayerBeta.exe. This is
-        ; a LAUNCH-DISPATCH FAILURE - the protocol handoff (typically via
-        ; browser) silently dropped our request. The 23 Jun 6-hour cascade
-        ; was 71 of these in a row, each one piling another browser tab.
+        ; V3.2.11: ALL launch methods in the ladder failed. Each one had
+        ; 60s to spawn RobloxPlayerBeta.exe. This is a real dispatch
+        ; failure - browser is wedged, protocol handler broken, or
+        ; Roblox client itself is corrupted. Bump counter; circuit-break
+        ; only after several full-ladder failures so we don't give up
+        ; while the user is away.
         FailedReconnects += 1
         LaunchDispatchFails += 1
         postLaunchLogs := GetPlayerLogSnapshot()
         newLog := DiffPlayerLogs(preLaunchLogs, postLaunchLogs)
         evidence := newLog ? ("new player log appeared: " . newLog . " - Roblox may have started then died silently") : "no new Roblox player log was created at all - protocol handoff dropped"
-        Log("LAUNCH DISPATCH FAILURE #" . LaunchDispatchFails . " (consecutive): Roblox process never spawned within 90s. Kind=" . launchKindHint . ". Evidence: " . evidence, "Error")
-        Notify("error", APP_NAME, "Launch dispatch failed (#" . LaunchDispatchFails . ")")
+        Log("LAUNCH DISPATCH FAILURE #" . LaunchDispatchFails . " (consecutive): tried " . methodLadder.Length . " methods, none spawned Roblox. Kind=" . launchKindHint . ". Evidence: " . evidence, "Error")
+        Notify("error", APP_NAME, "All " . methodLadder.Length . " launch methods failed (#" . LaunchDispatchFails . ")")
         IsAntiAfkPaused := false
         ReconnectInProgress := false
         LastReconnectReason := ""
-        if (LaunchDispatchFails >= 2) {
-            Log("Launch dispatch failed " . LaunchDispatchFails . " times in a row - STOPPING monitor to avoid browser-tab cascade. User must manually relaunch Roblox.", "Error")
-            Notify("error", APP_NAME, "Reconnect halted: launch dispatch broken (" . LaunchDispatchFails . " fails). Manual relaunch required.")
+        ; V3.2.11: stop after 4 full-ladder failures (~16 min of trying)
+        ; instead of 2. The ladder itself buys us much better recovery,
+        ; so we can afford to keep trying longer before giving up.
+        if (LaunchDispatchFails >= 4) {
+            Log("Launch ladder failed " . LaunchDispatchFails . " full passes in a row - STOPPING monitor. Manual relaunch required.", "Error")
+            Notify("error", APP_NAME, "Reconnect halted: all launch methods broken (" . LaunchDispatchFails . " full-ladder fails). Manual relaunch required.")
             StopMonitoring()
         }
     } catch Error as e {
@@ -3065,6 +3095,146 @@ CloseRobloxInstance(pid := 0) {
     }
 }
 
+; V3.2.11: build the ordered ladder of launch methods to try when
+; reconnecting. Each method is a Map with name/desc/prepare?/fire.
+; fire() returns the PID from Run() (or 0 for URI launches) and throws
+; on hard failure. The caller waits up to 60s for RobloxPlayerBeta.exe
+; to actually appear after each fire().
+;
+; Method order is designed for the common failure mode (browser-mediated
+; HTTPS launch silently dropped by roblox.com under tab pressure):
+;   1. default            - what we've always done; cheap, usually works
+;   2. fresh-browser      - kill all browser processes first, then retry
+;                           (most common rescue for the 23 Jun cascade)
+;   3. url-shortcut-file  - write a .url file and ShellExecute it; uses
+;                           the exact same code path as a user double-
+;                           clicking a desktop shortcut
+;   4. alt-browser        - if any non-default browser is installed, try
+;                           launching the URL through it directly
+;
+; For direct-URI launches (target starts with roblox-player: or
+; roblox://) only methods 1 and 3 apply - browser tricks are irrelevant.
+BuildLaunchMethodLadder(target, kindHint) {
+    methods := []
+    isDirectUri := (kindHint = "direct-URI")
+    methods.Push(Map(
+        "name", "default-shell",
+        "desc", "Run(target) via default protocol handler",
+        "fire", LaunchMethod_Default.Bind(target)
+    ))
+    if (!isDirectUri) {
+        methods.Push(Map(
+            "name", "fresh-browser",
+            "desc", "kill all browser processes, then Run(target) into a clean browser",
+            "prepare", LaunchMethod_KillBrowsers,
+            "fire", LaunchMethod_Default.Bind(target)
+        ))
+    }
+    methods.Push(Map(
+        "name", "url-shortcut-file",
+        "desc", "write a .url shortcut file and ShellExecute it (equivalent to user double-click)",
+        "fire", LaunchMethod_UrlShortcut.Bind(target)
+    ))
+    if (!isDirectUri) {
+        altBrowser := FindAlternateBrowser()
+        if (altBrowser) {
+            methods.Push(Map(
+                "name", "alt-browser:" . altBrowser["name"],
+                "desc", "launch URL directly via " . altBrowser["path"],
+                "fire", LaunchMethod_AltBrowser.Bind(target, altBrowser["path"])
+            ))
+        }
+    }
+    return methods
+}
+
+LaunchMethod_Default(target) {
+    pid := 0
+    Run(target, , , &pid)
+    return pid
+}
+
+LaunchMethod_KillBrowsers() {
+    killed := []
+    for procName in ["msedge.exe", "chrome.exe", "firefox.exe", "brave.exe", "opera.exe"] {
+        loopGuard := 0
+        while (existingPid := ProcessExist(procName)) {
+            try ProcessClose(existingPid)
+            Sleep(200)
+            if (ProcessExist(existingPid))
+                try RunWait('taskkill /F /PID ' . existingPid, , "Hide")
+            killed.Push(procName . ":" . existingPid)
+            if (++loopGuard > 12)
+                break  ; safety - browsers spawn many child processes
+        }
+    }
+    if (killed.Length > 0) {
+        Log("Killed " . killed.Length . " browser processes before retry: " . (killed.Length > 6 ? killed.Length . " procs" : ArrayJoin(killed, ", ")), "Info")
+        Sleep(2000)  ; give browsers time to fully exit
+    } else {
+        Log("No browser processes were running to kill", "Info")
+    }
+}
+
+LaunchMethod_UrlShortcut(target) {
+    shortcutPath := A_Temp . "\RobloxReconnect-launch.url"
+    try FileDelete(shortcutPath)
+    FileAppend("[InternetShortcut]`r`nURL=" . target . "`r`n", shortcutPath)
+    pid := 0
+    Run(shortcutPath, , , &pid)
+    return pid
+}
+
+LaunchMethod_AltBrowser(target, browserPath) {
+    pid := 0
+    Run('"' . browserPath . '" "' . target . '"', , , &pid)
+    return pid
+}
+
+; Returns a Map(name, path) for the FIRST installed browser that is NOT
+; the system default, or "" if none found. Used by the alt-browser
+; launch method as a last-resort fallback.
+FindAlternateBrowser() {
+    candidates := [
+        Map("name", "Edge",    "path", A_ProgramFiles . "\Microsoft\Edge\Application\msedge.exe"),
+        Map("name", "Edge",    "path", "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        Map("name", "Chrome",  "path", A_ProgramFiles . "\Google\Chrome\Application\chrome.exe"),
+        Map("name", "Chrome",  "path", "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
+        Map("name", "Firefox", "path", A_ProgramFiles . "\Mozilla Firefox\firefox.exe"),
+        Map("name", "Firefox", "path", "C:\Program Files (x86)\Mozilla Firefox\firefox.exe"),
+        Map("name", "Brave",   "path", A_ProgramFiles . "\BraveSoftware\Brave-Browser\Application\brave.exe")
+    ]
+    defaultName := DetectDefaultBrowserName()
+    for cand in candidates {
+        if (FileExist(cand["path"]) && cand["name"] != defaultName)
+            return cand
+    }
+    return ""
+}
+
+; Best-effort default-browser detection via registry; returns the name
+; portion (e.g. "Edge", "Chrome", "Firefox") or "" if unknown.
+DetectDefaultBrowserName() {
+    progId := ""
+    try progId := RegRead("HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice", "ProgId")
+    if (InStr(progId, "Edge"))
+        return "Edge"
+    if (InStr(progId, "Chrome"))
+        return "Chrome"
+    if (InStr(progId, "Firefox"))
+        return "Firefox"
+    if (InStr(progId, "Brave"))
+        return "Brave"
+    return ""
+}
+
+ArrayJoin(arr, sep) {
+    s := ""
+    for i, v in arr
+        s .= (i = 1 ? "" : sep) . v
+    return s
+}
+
 ; --- Log-file tailing -----------------------------------------------------
 ; Locates the newest log file in %LOCALAPPDATA%\Roblox\logs and returns
 ; its full path, or "" if none.
@@ -3112,13 +3282,16 @@ DiffPlayerLogs(pre, post) {
 GetProcessNameForPid(pid) {
     if (!pid)
         return "no-pid"
+    name := ""
     try {
-        for proc in ComObjGet("winmgmts:").ExecQuery("SELECT Name FROM Win32_Process WHERE ProcessId=" . pid)
-            return proc.Name
-    } catch {
-        ; fall through
+        for proc in ComObjGet("winmgmts:").ExecQuery("SELECT Name FROM Win32_Process WHERE ProcessId=" . pid) {
+            name := proc.Name
+            break
+        }
+    } catch Error as e {
+        return "unknown"
     }
-    return "unknown"
+    return name ? name : "unknown"
 }
 
 ; V3.2.5: detect a Roblox client update in progress so we can defer
