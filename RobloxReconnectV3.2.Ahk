@@ -35,7 +35,7 @@ SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
 global APP_NAME       := "Roblox Auto-Reconnect V3.2.9"
-global APP_VERSION    := "3.2.9"
+global APP_VERSION    := "3.2.10"
 global APP_AUTHOR     := "INNIE (V3.2.9: universal server-disconnect patterns from real logs)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
@@ -55,6 +55,7 @@ global IsAntiAfkActive    := false
 global IsAntiAfkPaused    := false  ; transient pause during reconnect
 global ReconnectAttempts  := 0
 global LastReconnectTime  := 0
+global LaunchDispatchFails := 0  ; V3.2.10: consecutive "Roblox never spawned" launches
 global SessionStart       := A_TickCount
 global LifetimeReconnects := 0
 global LifetimeCrashes    := 0
@@ -1733,8 +1734,9 @@ AutoRejoinTick() {
 }
 
 ManualReconnect(*) {
-    global ReconnectAttempts, LastReconnectTime
+    global ReconnectAttempts, LastReconnectTime, LaunchDispatchFails
     ReconnectAttempts := 0
+    LaunchDispatchFails := 0  ; V3.2.10: manual click clears dispatch-fail circuit-breaker
     LastReconnectTime := A_TickCount  ; gate concurrent detector triggers (B2 fix)
     ReconnectToGame()
 }
@@ -1823,37 +1825,40 @@ ReconnectToGame(targetPid := 0) {
         jitter := Cfg["JitterSec"] > 0 ? Random(0, Cfg["JitterSec"] * 1000) : 0
         Sleep(1000 + jitter)
         newPid := 0
+        ; V3.2.10: snapshot Roblox-log dir state so we can detect whether
+        ; a new Player session log actually got created (proves Roblox
+        ; truly started, not just our Run() returned a browser PID).
+        preLaunchLogs := GetPlayerLogSnapshot()
+        launchKindHint := (InStr(target, "roblox-player:") || InStr(target, "roblox://")) ? "direct-URI" : "https-via-browser"
+        Log("Launch dispatch: kind=" . launchKindHint . " target=" . MaskVipForView(target), "Info")
         Run(target, , , &newPid)
         LastLaunchPid := newPid
         LastLaunchTickCount := A_TickCount  ; B4: arm post-launch hang grace
-        ; R2 success-check fix: poll for OUR launched PID, not any
-        ; RobloxPlayerBeta.exe (per-PID close can leave siblings running
-        ; and the old "ProcessExist(name)" check would declare instant
-        ; false success in multi-instance setups).
+        if (newPid > 0) {
+            Log("Run() returned PID " . newPid . " (" . GetProcessNameForPid(newPid) . ") - NOT trusted as Roblox proof", "Info")
+        } else {
+            Log("Run() returned no PID (URI/protocol launch) - waiting for RobloxPlayerBeta.exe to appear", "Info")
+        }
+        ; V3.2.10 fix: ALWAYS wait for RobloxPlayerBeta.exe specifically.
+        ; The old code trusted newPid > 0 as proof, but for https VIP links
+        ; newPid is the BROWSER's PID - browser exists instantly even when
+        ; the protocol-handoff to Roblox silently fails. That caused the
+        ; 23 Jun 03:04->09:07 6-hour cascade: 71 reconnects logged as
+        ; "Roblox launched" but only 1 actually spawned Roblox.exe (the
+        ; rest piled up browser tabs while Roblox.com refused to fire the
+        ; protocol).
         launched := false
-        ; V3.2.4: bumped 30->90 iterations. A cold Roblox bootstrap (with
-        ; update checks / patch download) can genuinely take 60-90s before
-        ; RobloxPlayerBeta.exe appears, and a too-short wait here would
-        ; declare the launch a failure and fire ANOTHER URI on top of the
-        ; in-flight bootstrap, multiplying the zombie problem.
+        preExistingPid := ProcessExist("RobloxPlayerBeta.exe")  ; sibling we should ignore
         Loop 90 {
-            ; ShellExecute via roblox:// URI scheme returns no PID; fall
-            ; back to "any RobloxPlayerBeta.exe spawned after our launch
-            ; tick" detection in that case.
-            if (newPid > 0) {
-                if (ProcessExist(newPid)) {
-                    launched := true
-                    break
-                }
-            } else {
-                ; URI-launched: wait for ANY new RobloxPlayerBeta.exe.
-                ; CloseRobloxInstance already exited the targeted pid;
-                ; if a Roblox process exists now, it's our new one or a
-                ; pre-existing sibling - either way, good enough.
-                if (ProcessExist("RobloxPlayerBeta.exe")) {
-                    launched := true
-                    break
-                }
+            curPid := ProcessExist("RobloxPlayerBeta.exe")
+            if (curPid && curPid != preExistingPid) {
+                Log("RobloxPlayerBeta.exe spawned (PID " . curPid . ") after " . A_Index . "s wait", "Info")
+                launched := true
+                break
+            }
+            if (Mod(A_Index, 10) = 0) {
+                browserState := (newPid > 0 && ProcessExist(newPid)) ? ("browser PID " . newPid . " alive") : "browser PID gone"
+                Log("Waiting for Roblox process... " . A_Index . "s/90s (" . browserState . ", no RobloxPlayerBeta.exe yet)", "Info")
             }
             Sleep(1000)
         }
@@ -1883,8 +1888,8 @@ ReconnectToGame(targetPid := 0) {
             }
             if (!launchOk) {
                 FailedReconnects += 1
-                Log("Roblox did not stay running after launch (60s timeout)", "Error")
-                Notify("error", APP_NAME, "Roblox did not stay running after launch")
+                Log("Roblox process appeared then died within 60s (crash-on-start, not a dispatch failure)", "Error")
+                Notify("error", APP_NAME, "Roblox crashed within 60s of launch")
                 IsAntiAfkPaused := false
                 ReconnectInProgress := false
                 LastReconnectReason := ""
@@ -1909,6 +1914,7 @@ ReconnectToGame(targetPid := 0) {
             LifetimeReconnects += 1
             SuccessfulReconnects += 1
             ReconnectAttempts := 0  ; B6: backoff is per-incident, not lifetime
+            LaunchDispatchFails := 0  ; V3.2.10: clear dispatch-fail counter on success
             SaveStats()
             Log("Joined " . p["name"] . " successfully", "Info")
             Notify("connect", APP_NAME, "Joined " . p["name"])
@@ -1921,12 +1927,25 @@ ReconnectToGame(targetPid := 0) {
             CheckLifetimeStopCap()
             return
         }
+        ; V3.2.10: 90s elapsed with no new RobloxPlayerBeta.exe. This is
+        ; a LAUNCH-DISPATCH FAILURE - the protocol handoff (typically via
+        ; browser) silently dropped our request. The 23 Jun 6-hour cascade
+        ; was 71 of these in a row, each one piling another browser tab.
         FailedReconnects += 1
-        Log("Roblox did not start within 30s", "Error")
-        Notify("error", APP_NAME, "Roblox did not start within 30s")
+        LaunchDispatchFails += 1
+        postLaunchLogs := GetPlayerLogSnapshot()
+        newLog := DiffPlayerLogs(preLaunchLogs, postLaunchLogs)
+        evidence := newLog ? ("new player log appeared: " . newLog . " - Roblox may have started then died silently") : "no new Roblox player log was created at all - protocol handoff dropped"
+        Log("LAUNCH DISPATCH FAILURE #" . LaunchDispatchFails . " (consecutive): Roblox process never spawned within 90s. Kind=" . launchKindHint . ". Evidence: " . evidence, "Error")
+        Notify("error", APP_NAME, "Launch dispatch failed (#" . LaunchDispatchFails . ")")
         IsAntiAfkPaused := false
         ReconnectInProgress := false
         LastReconnectReason := ""
+        if (LaunchDispatchFails >= 2) {
+            Log("Launch dispatch failed " . LaunchDispatchFails . " times in a row - STOPPING monitor to avoid browser-tab cascade. User must manually relaunch Roblox.", "Error")
+            Notify("error", APP_NAME, "Reconnect halted: launch dispatch broken (" . LaunchDispatchFails . " fails). Manual relaunch required.")
+            StopMonitoring()
+        }
     } catch Error as e {
         FailedReconnects += 1
         Log("Reconnect error: " . e.Message, "Error")
@@ -3062,6 +3081,44 @@ GetLatestRobloxLog() {
         }
     }
     return newest
+}
+
+; V3.2.10: snapshot of all Player_*_last.log filenames currently in the
+; Roblox log dir. Used pre/post-launch to detect whether Roblox actually
+; created a new session log (= the protocol handoff fired) or not.
+GetPlayerLogSnapshot() {
+    local logDir := EnvGet("LOCALAPPDATA") . "\Roblox\logs"
+    local names := Map()
+    if (!DirExist(logDir))
+        return names
+    Loop Files, logDir . "\*_Player_*_last.log" {
+        names[A_LoopFileName] := true
+    }
+    return names
+}
+
+; Returns the first filename present in `post` but not in `pre`, or "" if none.
+DiffPlayerLogs(pre, post) {
+    for name, _ in post {
+        if (!pre.Has(name))
+            return name
+    }
+    return ""
+}
+
+; V3.2.10: best-effort process-name lookup for a PID via WMI, used to
+; identify whether Run() returned a browser PID vs the Roblox launcher.
+; Returns "unknown" on any failure - never throws.
+GetProcessNameForPid(pid) {
+    if (!pid)
+        return "no-pid"
+    try {
+        for proc in ComObjGet("winmgmts:").ExecQuery("SELECT Name FROM Win32_Process WHERE ProcessId=" . pid)
+            return proc.Name
+    } catch {
+        ; fall through
+    }
+    return "unknown"
 }
 
 ; V3.2.5: detect a Roblox client update in progress so we can defer

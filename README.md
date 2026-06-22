@@ -188,6 +188,37 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.10
+*Fix the false-positive "Roblox launched" log that allowed a 6-hour
+browser-tab cascade overnight, plus add launch-dispatch circuit-breaker
+and verbose launch logging.*
+- 🐛 **23 June, 03:04 → 09:07 (6 hours) lost.** Roblox disconnected at
+  03:03; V3.2.7+V3.2.9 detection correctly fired Reconnect #1, but the
+  90s launch-wait trusted `newPid` (returned by `Run("https://...")` =
+  the **browser's** PID, not Roblox's). `ProcessExist(browserPid)` was
+  instantly true → logged `"Roblox launched, waiting for load..."` →
+  stability check then failed because Roblox.exe never actually spawned.
+  Only 1 of the 71 retry attempts created a Player session log (proof
+  Roblox really started); the other 70 just piled up browser tabs while
+  `roblox.com`'s protocol-handoff silently dropped each request.
+- ✅ Wait loop now ALWAYS requires a new `RobloxPlayerBeta.exe` PID
+  (different from any pre-existing sibling) before logging
+  `"Roblox launched"`. Eliminates the false-positive entirely.
+- ✅ Launch-dispatch circuit-breaker: after 2 consecutive "Roblox never
+  spawned within 90s" failures, monitoring auto-STOPS with a tray
+  notification. Last night's 71-attempt cascade would have been 2.
+- ✅ Verbose launch logging: target kind (`direct-URI` vs
+  `https-via-browser`), `Run()` returned PID *and* its process name
+  (e.g. `msedge.exe`), 10s progress ticks during the 90s wait, and on
+  failure a clear `LAUNCH DISPATCH FAILURE #N` line plus evidence from
+  the Roblox-logs dir (`"no new Roblox player log was created at all"`
+  vs `"new player log appeared - Roblox started then died"`).
+- ✅ Clear distinction between **dispatch failure** (protocol handoff
+  silently dropped — no `RobloxPlayerBeta.exe` ever appeared) and
+  **crash-on-start** (process spawned, died within 60s) — two different
+  failure modes with different log messages and recovery paths.
+- ✅ Manual reconnect resets the dispatch-fail counter.
+
 ### v3.2.9
 *Add the two UNIVERSAL server-disconnect patterns, derived from real
 captured AFK-mirror logs.*
