@@ -34,9 +34,9 @@ Persistent()
 SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
-global APP_NAME       := "Roblox Auto-Reconnect V3.2.8"
-global APP_VERSION    := "3.2.8"
-global APP_AUTHOR     := "INNIE (V3.2.8: hotfix stray brace from V3.2.7 debounce)"
+global APP_NAME       := "Roblox Auto-Reconnect V3.2.9"
+global APP_VERSION    := "3.2.9"
+global APP_AUTHOR     := "INNIE (V3.2.9: universal server-disconnect patterns from real logs)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
 global CONFIG_FILE    := DATA_DIR . "\config.ini"
@@ -3345,6 +3345,27 @@ LogTailTick() {
 DetectDisconnectInLog(text) {
     if (text = "")
         return ""
+    ; V3.2.9: UNIVERSAL server-initiated disconnect patterns. Verified
+    ; ground truth from captured AFK-mirror Roblox logs (June 2026):
+    ; every real server-side disconnect we have on file produces ONE OR
+    ; BOTH of these two lines, regardless of disconnect reason code:
+    ;   [FLog::Network] Client has been disconnected with reason: <text>
+    ;   [FLog::Network] Lost connection with reason : <text>
+    ; (Note: 'Lost connection with reason' has a SPACE before the colon
+    ; in the actual log output - we match without the colon to be safe.)
+    ; Observed values for <text>:
+    ;   "The server has shut down"   (planned server shutdown, code 288)
+    ;   "Disconnected from game, possibly due to game joined from another device"
+    ; These patterns are INHERENTLY teleport-safe because teleports are
+    ; client-initiated (the client sends 'Sending disconnect with reason:
+    ; 285' but never receives the server's 'you have been disconnected'
+    ; reply). V3.2.7's pending-disconnect debounce remains the safety
+    ; net if a future Roblox version changes this.
+    if (InStr(text, "Client has been disconnected with reason"))
+        return "client disconnected"
+    if (InStr(text, "Lost connection with reason"))
+        return "lost connection"
+    ; --- legacy / safety-net patterns (kept; cost is zero) ---
     if (InStr(text, "Disconnect with reason: Lost") || InStr(text, "Disconnect with reason: Timeout")
         || InStr(text, "Disconnect with reason: KickedFromGame"))
         return "Disconnect with reason"
@@ -3356,6 +3377,9 @@ DetectDisconnectInLog(text) {
         return "network time-out"
     if (InStr(text, "Lost connection to the game"))
         return "connection lost"
+    ; Note: the "Error Code: NNN" patterns below have NEVER matched in
+    ; any captured log - they're dialog text, not log text. Retained as
+    ; defense-in-depth in case a future Roblox version emits them.
     if (InStr(text, "Error Code: 17") || InStr(text, "Error Code: 260")
         || InStr(text, "Error Code: 264") || InStr(text, "Error Code: 268")
         || InStr(text, "Error Code: 277") || InStr(text, "Error Code: 279")

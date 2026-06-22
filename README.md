@@ -188,6 +188,39 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.9
+*Add the two UNIVERSAL server-disconnect patterns, derived from real
+captured AFK-mirror logs.*
+- 🐛 **22 June, 15:15 silent disconnect, ignored for 1h 27m.** The
+  AFK PC's bambPserver shut down (reason code 288). The Roblox process
+  stayed alive on the disconnect screen; `LogTailTick`'s
+  `DetectDisconnectInLog` was checking too-specific phrases that didn't
+  match what Roblox actually wrote:
+  - log said `Disconnect with reason: 288` (numeric code) — script
+    only matched `Disconnect with reason: Lost|Timeout|KickedFromGame`
+  - log said `Client has been disconnected with reason: The server has
+    shut down` — script had no equivalent pattern
+  - log said `Lost connection with reason : The server has shut down`
+    (note space before colon) — script only matched `Lost connection
+    to the game` (different phrasing)
+- ✨ **Universal patterns added** (verified against every captured
+  disconnect we have on file):
+  - `Client has been disconnected with reason`
+  - `Lost connection with reason`
+  These fire on EVERY real server-side disconnect (planned shutdown,
+  logged-in-elsewhere, etc.) and are inherently teleport-safe (teleports
+  don't emit them — the client initiates them, so no server reply).
+- 📝 Documented that the `Error Code: NNN` patterns have never matched
+  in any captured log (they're user-dialog text, not log text). Kept as
+  defense-in-depth.
+- 📝 Confirmed reason-code mapping from our own logs:
+  - **285** = in-game teleport (paired with `UgcExperienceController:
+    doTeleport`) — V3.2.7 debounce handles these.
+  - **288** = real server shutdown (paired with `Client has been
+    disconnected with reason: The server has shut down`).
+  The web's "285 = server shutdown" claim is wrong (it conflates
+  user-facing Error Code with internal RakNet reason).
+
 ### v3.2.8
 *Hotfix: removes stray top-level `}` introduced by V3.2.7.*
 - 🐛 V3.2.7 added an extra closing brace at top level (after
