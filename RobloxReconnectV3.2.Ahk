@@ -35,7 +35,7 @@ SetWorkingDir(A_ScriptDir)
 
 ; ====== Application Constants ======
 global APP_NAME       := "Roblox Auto-Reconnect V3.2.9"
-global APP_VERSION    := "3.2.11"
+global APP_VERSION    := "3.2.12"
 global APP_AUTHOR     := "INNIE (V3.2.9: universal server-disconnect patterns from real logs)"
 global APP_REPO       := "lachlanmcglennon/RobloxReconnect"
 global DATA_DIR       := A_ScriptDir . "\RobloxReconnect-Data"
@@ -56,6 +56,11 @@ global IsAntiAfkPaused    := false  ; transient pause during reconnect
 global ReconnectAttempts  := 0
 global LastReconnectTime  := 0
 global LaunchDispatchFails := 0  ; V3.2.10: consecutive "Roblox never spawned" launches
+; --- V3.2.12: boss-detection state ---
+global LastCrateAtTickCount := 0   ; A_TickCount of most recent crate observed in log
+global BossInProgress       := false
+global BossWindowStartedAt  := 0   ; A_TickCount when current boss window opened
+global BossAlertSentAt      := 0   ; A_TickCount of the last alert we sent (rate-limit)
 global SessionStart       := A_TickCount
 global LifetimeReconnects := 0
 global LifetimeCrashes    := 0
@@ -145,7 +150,7 @@ global Cfg := Map(
     "WindowX",             -1,             ; -1 = unset
     "WindowY",             -1,
     "WindowW",             580,
-    "WindowH",             580,
+    "WindowH",             620,
     "Hotkey_ToggleMonitor","F1",
     "Hotkey_Reconnect",    "F2",
     "Hotkey_Minimize",     "F3",
@@ -157,7 +162,18 @@ global Cfg := Map(
     "DetectViaLog",        true,   ; tail %LOCALAPPDATA%\Roblox\logs for disconnect patterns
     "DetectViaHang",       true,   ; IsHungAppWindow check on Roblox windows
     "HangGraceSec",        15,     ; window must be hung for this many seconds before triggering
-    "LogTailIntervalSec",  3       ; how often to read incremental log bytes
+    "LogTailIntervalSec",  3,      ; how often to read incremental log bytes
+    ; --- V3.2.12: boss-spawn detection via crate-drop gap analysis ---
+    ; Game prints "Loading crate with items: table: 0x..." every ~5 min
+    ; during normal play. Boss windows last 15-20 min and SUPPRESS crate
+    ; drops, so a gap > BossGapThresholdSec from the last crate is a
+    ; reliable boss-spawned signal. Real captured logs show normal gaps
+    ; cluster at 5 min and boss gaps cluster at 10-30 min - 7 min is the
+    ; clean separating threshold.
+    "BossDetectionEnabled", true,
+    "BossGapThresholdSec",  420,   ; 7 min; bump if seeing false positives
+    "BossDiscordWebhook",   "",    ; separate webhook for ops channel; falls back to DiscordWebhook
+    "BossDiscordMention",   "@here" ; or "<@&ROLE_ID>" to ping a specific role
 )
 
 ; ====== Bootstrap ======
@@ -384,6 +400,21 @@ myGui.Add("Text", "x40 y365 w100", "Webhook URL:")
 DiscordUrlEdit := myGui.Add("Edit", "x140 y362 w340 h22", Cfg["DiscordWebhook"])
 TestDiscordBtn := myGui.Add("Button", "x485 y361 w50 h22", "Test")
 TestDiscordBtn.OnEvent("Click", (*) => TestDiscord())
+
+; --- V3.2.12: Boss detection via crate-gap analysis ---
+myGui.Add("GroupBox", "x20 y420 w520 h130", "Boss-Spawn Detector (Discord ping)")
+BossDetectCheck := myGui.Add("Checkbox", "x40 y445 w400", "Detect boss spawns from crate-drop gap and ping Discord")
+BossDetectCheck.Value := Cfg["BossDetectionEnabled"] ? 1 : 0
+myGui.Add("Text", "x40 y475 w100", "Gap threshold:")
+BossGapEdit := myGui.Add("Edit", "x140 y472 w60 h22 Number", Cfg["BossGapThresholdSec"])
+myGui.Add("Text", "x205 y475 w220 cGray", "seconds (default 420 = 7 min)")
+myGui.Add("Text", "x40 y502 w100", "Ops webhook:")
+BossWebhookEdit := myGui.Add("Edit", "x140 y499 w340 h22", Cfg["BossDiscordWebhook"])
+TestBossBtn := myGui.Add("Button", "x485 y499 w50 h22", "Test")
+TestBossBtn.OnEvent("Click", (*) => TestBossDiscord())
+myGui.Add("Text", "x40 y527 w100", "Mention:")
+BossMentionEdit := myGui.Add("Edit", "x140 y524 w120 h22", Cfg["BossDiscordMention"])
+myGui.Add("Text", "x265 y527 w275 cGray", "@here, @everyone, or <@&ROLEID>")
 
 ; ---------- Schedule Tab ----------
 Tab.UseTab(6)
@@ -867,6 +898,10 @@ PullCfgFromGui() {
     Cfg["SoundVolume"]         := SafeInt(SoundVolSlider.Value, Cfg["SoundVolume"])
     Cfg["DiscordEnabled"]      := (DiscordCheck.Value = 1)
     Cfg["DiscordWebhook"]      := DiscordUrlEdit.Text
+    Cfg["BossDetectionEnabled"]:= (BossDetectCheck.Value = 1)
+    Cfg["BossGapThresholdSec"] := SafeInt(BossGapEdit.Text, Cfg["BossGapThresholdSec"])
+    Cfg["BossDiscordWebhook"]  := BossWebhookEdit.Text
+    Cfg["BossDiscordMention"]  := BossMentionEdit.Text
     Cfg["NotifyOnConnect"]     := (NotifyConnCheck.Value = 1)
     Cfg["NotifyOnDisconnect"]  := (NotifyDiscCheck.Value = 1)
     Cfg["NotifyOnError"]       := (NotifyErrCheck.Value = 1)
@@ -936,6 +971,10 @@ PushCfgToGui() {
     SoundVolSlider.Value      := Cfg["SoundVolume"]
     DiscordCheck.Value        := Cfg["DiscordEnabled"] ? 1 : 0
     DiscordUrlEdit.Text       := Cfg["DiscordWebhook"]
+    BossDetectCheck.Value     := Cfg["BossDetectionEnabled"] ? 1 : 0
+    BossGapEdit.Text          := Cfg["BossGapThresholdSec"]
+    BossWebhookEdit.Text      := Cfg["BossDiscordWebhook"]
+    BossMentionEdit.Text      := Cfg["BossDiscordMention"]
     NotifyConnCheck.Value     := Cfg["NotifyOnConnect"] ? 1 : 0
     NotifyDiscCheck.Value     := Cfg["NotifyOnDisconnect"] ? 1 : 0
     NotifyErrCheck.Value      := Cfg["NotifyOnError"] ? 1 : 0
@@ -1020,12 +1059,14 @@ ResetDefaults() {
         "StartMonitoringOnLaunch",false, "ActiveProfile",1,
         "RotateProfiles",false, "StopAfterReconnects",0, "PauseOnBattery",false,
         "MaskVipLinks",true, "HideLinksInLogs",true, "BackupConfigOnSave",true,
-        "RememberWindowPos",true, "WindowX",-1, "WindowY",-1, "WindowW",580, "WindowH",580,
+        "RememberWindowPos",true, "WindowX",-1, "WindowY",-1, "WindowW",580, "WindowH",620,
         "Hotkey_ToggleMonitor","F1", "Hotkey_Reconnect","F2", "Hotkey_Minimize","F3",
         "Hotkey_AntiAfk","F4", "Hotkey_Emergency","^+r", "Hotkey_Panic","^+q",
         "AutoUpdateCheck",true,
         "DetectViaLog",true, "DetectViaHang",true,
-        "HangGraceSec",15, "LogTailIntervalSec",3
+        "HangGraceSec",15, "LogTailIntervalSec",3,
+        "BossDetectionEnabled",true, "BossGapThresholdSec",420,
+        "BossDiscordWebhook","", "BossDiscordMention","@here"
     )
     SaveConfig()
     PushCfgToGui()
@@ -2285,15 +2326,38 @@ BrowseSoundFile(editCtl) {
 
 SendDiscord(message) {
     global Cfg
+    PostDiscordWebhook(Cfg["DiscordWebhook"], message)
+}
+
+; V3.2.12: synchronous webhook post with status reporting. Discord
+; requires a User-Agent header (the old async fire-and-forget code
+; was silently 401'ing on some setups). Returns true on success
+; (2xx HTTP), false otherwise; errors are logged either way.
+PostDiscordWebhook(webhookUrl, message, mention := "") {
+    global APP_NAME
+    if (webhookUrl = "") {
+        Log("Discord webhook URL is empty - cannot send", "Warn")
+        return false
+    }
+    content := mention != "" ? mention . " " . message : message
+    payload := '{"content":"' . EscapeJson(content) . '","username":"' . APP_NAME . '","allowed_mentions":{"parse":["everyone","roles","users"]}}'
     try {
-        payload := '{"content":"' . EscapeJson(message) . '","username":"' . APP_NAME . '"}'
         http := ComObject("WinHttp.WinHttpRequest.5.1")
-        http.SetTimeouts(4000, 4000, 4000, 4000)
-        http.Open("POST", Cfg["DiscordWebhook"], true)
+        http.SetTimeouts(5000, 5000, 5000, 8000)
+        http.Open("POST", webhookUrl, false)  ; SYNC so we can check status
         http.SetRequestHeader("Content-Type", "application/json")
+        http.SetRequestHeader("User-Agent", APP_NAME . "/" . APP_VERSION . " (AHK; +https://github.com/lachlanmcglennon/RobloxReconnect)")
         http.Send(payload)
+        status := http.Status
+        if (status >= 200 && status < 300) {
+            Log("Discord webhook OK (HTTP " . status . ")", "Debug")
+            return true
+        }
+        Log("Discord webhook FAILED: HTTP " . status . " - response: " . SubStr(http.ResponseText, 1, 300), "Error")
+        return false
     } catch Error as e {
-        Log("Discord send failed: " . e.Message, "Error")
+        Log("Discord webhook EXCEPTION: " . e.Message, "Error")
+        return false
     }
 }
 
@@ -2306,14 +2370,125 @@ EscapeJson(s) {
     return s
 }
 
+; V3.2.12: count occurrences of "Loading crate with items" in the new
+; log chunk and update LastCrateAtTickCount. If we were in a boss
+; window, the first crate seen marks the boss-window-ended event.
+BossDetectorIngestChunk(chunk) {
+    global Cfg, LastCrateAtTickCount, BossInProgress, BossWindowStartedAt, BossAlertSentAt
+    if (!Cfg["BossDetectionEnabled"])
+        return
+    if (!InStr(chunk, "Loading crate with items"))
+        return
+    ; Count drops in this chunk (multiple structures can pop in one tick)
+    crateCount := 0
+    pos := 1
+    Loop {
+        pos := InStr(chunk, "Loading crate with items", false, pos)
+        if (!pos)
+            break
+        crateCount += 1
+        pos += 1
+    }
+    LastCrateAtTickCount := A_TickCount
+    if (BossInProgress) {
+        windowMin := Round((A_TickCount - BossWindowStartedAt) / 60000, 1)
+        Log("Crate observed - boss window ended after " . windowMin . " min (saw " . crateCount . " crate(s) in this tick)", "Info")
+        SendBossDiscord("✅ Boss window ended after " . windowMin . " min. Crate drops resumed.", false)
+        BossInProgress := false
+        BossWindowStartedAt := 0
+        BossAlertSentAt := 0
+    } else {
+        Log("Crate drop observed (" . crateCount . " in tick) - LastCrateAt refreshed", "Debug")
+    }
+}
+
+; V3.2.12: periodic check (called from LogTailTick). If gap exceeds
+; threshold AND Roblox is actually running (not crashed/disconnected)
+; AND we haven't already alerted for this gap, fire the boss alert.
+BossDetectorCheckGap() {
+    global Cfg, LastCrateAtTickCount, BossInProgress, BossWindowStartedAt, BossAlertSentAt
+    global GetActiveProfile
+    if (!Cfg["BossDetectionEnabled"])
+        return
+    if (BossInProgress)
+        return  ; already alerted this window; will reset on next crate
+    if (LastCrateAtTickCount = 0)
+        return  ; never primed yet (no crate seen since session start)
+    gapMs := A_TickCount - LastCrateAtTickCount
+    thresholdMs := Cfg["BossGapThresholdSec"] * 1000
+    if (gapMs < thresholdMs)
+        return
+    if (!ProcessExist("RobloxPlayerBeta.exe")) {
+        ; Roblox isn't running - this gap is from a crash/disconnect,
+        ; not a boss. Don't false-alarm.
+        return
+    }
+    gapSec := gapMs // 1000
+    BossInProgress := true
+    BossWindowStartedAt := LastCrateAtTickCount  ; gap began at last crate
+    BossAlertSentAt := A_TickCount
+    Log("BOSS DETECTED: " . gapSec . "s since last crate (threshold " . Cfg["BossGapThresholdSec"] . "s) - sending Discord alert", "Warn")
+    p := GetActiveProfile()
+    serverName := p ? p["name"] : "AFK server"
+    msg := "🚨 **BOSS SPAWNED** on AFK PC (" . serverName . ") - last crate drop was " . Round(gapSec / 60, 1) . " min ago. Boss windows last ~15-20 min, ops welcome!"
+    SendBossDiscord(msg, true)
+}
+
+; Reset boss-detector state on Roblox session rotation (new log file).
+BossDetectorResetForNewSession() {
+    global LastCrateAtTickCount, BossInProgress, BossWindowStartedAt, BossAlertSentAt
+    if (BossInProgress)
+        Log("Boss-detector: aborting in-progress window (new Roblox session rotated in)", "Info")
+    LastCrateAtTickCount := 0
+    BossInProgress := false
+    BossWindowStartedAt := 0
+    BossAlertSentAt := 0
+}
+
+; V3.2.12: send a boss-channel Discord ping. Uses BossDiscordWebhook
+; if set, otherwise falls back to the main DiscordWebhook. Only the
+; "alert" call adds the mention prefix; "ended" / status pings don't
+; spam pings.
+SendBossDiscord(message, withMention) {
+    global Cfg
+    url := Cfg["BossDiscordWebhook"] != "" ? Cfg["BossDiscordWebhook"] : Cfg["DiscordWebhook"]
+    if (url = "") {
+        Log("Boss-detector: no Discord webhook configured (BossDiscordWebhook and DiscordWebhook both empty) - skipping send", "Warn")
+        return
+    }
+    mention := withMention ? Cfg["BossDiscordMention"] : ""
+    PostDiscordWebhook(url, message, mention)
+}
+
 TestDiscord() {
     Cfg["DiscordWebhook"] := DiscordUrlEdit.Text
     if (Cfg["DiscordWebhook"] = "") {
         MsgBox("Enter a webhook URL first.", APP_NAME, 48)
         return
     }
-    SendDiscord("✅ Test message from " . APP_NAME)
-    MsgBox("Test sent (check your Discord channel).", APP_NAME, 64)
+    ok := PostDiscordWebhook(Cfg["DiscordWebhook"], "✅ Test message from " . APP_NAME . " v" . APP_VERSION)
+    if (ok)
+        MsgBox("Test sent successfully (HTTP 2xx). Check your Discord channel.", APP_NAME, 64)
+    else
+        MsgBox("Test FAILED. Check app.log for the HTTP status / error response.", APP_NAME, 48)
+}
+
+; V3.2.12: independent test for the boss-detector webhook (falls back
+; to the main DiscordWebhook if BossDiscordWebhook is empty).
+TestBossDiscord() {
+    Cfg["BossDiscordWebhook"] := BossWebhookEdit.Text
+    Cfg["BossDiscordMention"] := BossMentionEdit.Text
+    url := Cfg["BossDiscordWebhook"] != "" ? Cfg["BossDiscordWebhook"] : Cfg["DiscordWebhook"]
+    if (url = "") {
+        MsgBox("Enter a boss-ops webhook URL (or fill the main Discord webhook above to fall back to it).", APP_NAME, 48)
+        return
+    }
+    msg := "🧪 Boss-detector test from " . APP_NAME . " v" . APP_VERSION . " — if you see this, alerts are wired up."
+    ok := PostDiscordWebhook(url, msg, Cfg["BossDiscordMention"])
+    if (ok)
+        MsgBox("Boss test sent successfully (HTTP 2xx). Check the ops channel.", APP_NAME, 64)
+    else
+        MsgBox("Boss test FAILED. Check app.log for the HTTP status / error response.", APP_NAME, 48)
 }
 
 ; ---------- Logging ----------
@@ -3503,6 +3678,10 @@ LogTailTick() {
                 PendingDisconnectAt := 0
                 PendingDisconnectReason := ""
             }
+            ; V3.2.12: new session = stale crate timestamp from prior
+            ; session must be cleared. We'll re-prime on the first crate
+            ; we see in the new session.
+            BossDetectorResetForNewSession()
             return
         }
         local f := ""
@@ -3536,6 +3715,14 @@ LogTailTick() {
         f.Close()
         if (chunk = "")
             return
+        ; V3.2.12: scan for crate-drop prints in this chunk and update
+        ; LastCrateAtTickCount + handle boss-window state transitions.
+        BossDetectorIngestChunk(chunk)
+        ; V3.2.12: periodic check - if it's been > BossGapThresholdSec
+        ; since the last crate, we're in a boss window. Fire the alert
+        ; once per gap. (Cheap check; lives here so it runs every tail
+        ; tick = every ~3s by default.)
+        BossDetectorCheckGap()
         ; V3.2.7: process re-join evidence BEFORE new disconnect signals.
         ; If we're holding a pending disconnect and this chunk shows the
         ; client successfully joined a new server (the standard marker

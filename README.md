@@ -188,6 +188,42 @@ PRs welcome — please:
 
 ## 📝 Changelog
 
+### v3.2.12
+*New: boss-spawn detector via crate-drop gap analysis + sync Discord
+webhook with status reporting (the old async send silently failed on
+some setups).*
+- 🆕 **Boss-Spawn Detector.** Notifies a Discord webhook the moment a
+  boss spawns on the AFK PC, derived from inverse-signal analysis of
+  152 hours of captured logs:
+  * The game prints `Loading crate with items: table: 0x...` every
+    ~5 minutes during normal play (median gap = 5.0 min).
+  * Boss windows (15-20 min long) SUPPRESS crate drops, opening a
+    clean bimodal gap distribution: normal ≤ 5.5 min vs boss = 10-30
+    min. 7 min is the clean threshold.
+  * When `LogTailTick` sees > `BossGapThresholdSec` (default 420 s)
+    since the last crate AND Roblox is still running, it fires a
+    `🚨 BOSS SPAWNED on <serverName>` ping to the ops Discord webhook
+    with `@here` (configurable).
+  * Boss-window-ended message sent automatically when crates resume.
+  * State auto-resets on Roblox session rotation (new log file).
+- 🐛 **Discord webhook actually fails silently fixed.** The old
+  `SendDiscord` used async `http.Open(..., true)` with no status
+  check; if Discord rejected the request (missing User-Agent header,
+  bad URL, rate-limited) the script never logged the failure and the
+  Test button reported "sent" anyway. V3.2.12 replaces it with a
+  synchronous `PostDiscordWebhook(url, msg, mention)` that:
+  * Sends synchronously and checks HTTP status (logs the actual
+    status code + response body excerpt on non-2xx).
+  * Sets a proper `User-Agent` header (Discord rejects some requests
+    without one).
+  * Sets `allowed_mentions` so `@here` / role pings actually fire.
+  * Returns a bool so the Test button can show real success/failure.
+- ✅ Settings tab "Notifications" now has a **Boss-Spawn Detector**
+  group with: enable checkbox, gap-threshold (sec), separate ops
+  webhook URL (falls back to main webhook if blank), mention string
+  (default `@here`, supports `<@&ROLEID>`), and a dedicated Test
+  button.
+
 ### v3.2.11
 *Multi-method launch ladder so reconnect doesn't give up at the first
 silent dispatch failure - tries 3-4 alternative ways to spawn Roblox
